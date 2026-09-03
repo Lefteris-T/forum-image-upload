@@ -1,1038 +1,882 @@
-# Forum Authentication Optional — Task Plan
+# Forum Image Upload Extension — Task Plan
 
 ## Goal
 
-Extend the existing Go forum with **OAuth authentication** while keeping the current email/password authentication and the existing session architecture.
+Extend the existing Go forum-authentication project so registered users can create a post with text and an optional image. Users and guests must be able to view the image when reading the post.
 
-Mandatory providers:
+Supported image types for this extension:
 
-- GitHub
-- Google
+- JPEG
+- PNG
+- GIF
 
-The main learning goal is to understand the complete OAuth flow:
+Maximum upload size:
+
+- 20 MiB (`20 * 1024 * 1024`, or 20,971,520 bytes), displayed to users as
+  20 MB
+
+This plan is based on the uploaded `forum-authentication-lefteris` codebase. It preserves the current layered architecture:
 
 ```text
-Browser
-→ Forum
-→ OAuth Provider
-→ Callback to Forum
-→ Exchange code for access token
-→ Fetch provider user
-→ Find/Create local user
-→ Create normal forum session
-→ Set forum_session cookie
-→ Redirect to forum
+HTTP handler
+-> validation / service
+-> repository
+-> SQLite migrations
+-> templates / static files
 ```
 
-The existing forum session system remains the final authentication mechanism inside the application.
+Do not implement everything in one step. Each phase should end with tests and a small git commit.
 
 ---
 
-## Fixed decisions
+## Current Architecture Notes
 
-- Go only.
-- Use only the packages allowed by the exercise. Implement the OAuth HTTP flow
-  with the Go standard library (`net/http`, `net/url`, `encoding/json`,
-  `crypto/rand`, and related standard packages); do not add an OAuth library.
-- Keep the existing layered architecture.
-- Keep existing email/password registration and login.
-- GitHub + Google OAuth are additional authentication methods.
-- Reuse the existing `forum_session` cookie/session manager.
-- OAuth client secrets must come from environment variables.
-- Never commit OAuth secrets.
-- Identify accounts by the provider's stable user ID, never by email or
-  username.
-- Require a provider-verified email for first-time OAuth registration.
-- Do not automatically link accounts. If a provider email already belongs to a
-  local user or another provider identity, reject the OAuth login with a safe
-  conflict response.
-- OAuth users have no local password until an explicit password-setting feature
-  exists; never generate a fake password or reusable placeholder hash.
-- Create a first-time local user and its OAuth account atomically.
-- Use browser-bound, short-lived, single-use `state` and PKCE S256 during OAuth
-  authorization.
-- Do not persist provider access or refresh tokens; they are needed only long
-  enough to fetch the authenticated identity.
-- Prefer small phases: understand → test → implement → green → commit.
-- Start with GitHub first. Add Google only after the GitHub flow is understood and working.
+Important files already in the project:
 
-This file is the implementation plan for the new authentication extension. The
-existing forum remains the tested baseline even where older planning documents
-describe OAuth as future scope.
+- `internal/web/handler/post_creation.go`
+  - Handles `GET /posts/new` and `POST /posts`.
+  - Currently calls `r.ParseForm()`.
+  - Sends `title`, `body`, and `categoryIDs` to `PostService`.
 
----
+- `internal/service/post.go`
+  - Validates authenticated author.
+  - Calls `validation.ValidatePost`.
+  - Delegates persistence to `PostRepository.Create`.
 
-# Phase 1 — Map the existing authentication flow
+- `internal/validation/post.go`
+  - Owns text/category validation.
+  - `PostInput` currently contains `Title`, `Body`, and `CategoryIDs`.
 
-### Goal
+- `internal/repository/posts.go`
+  - `Create(authorID, title, body, categoryIDs)` inserts into `posts`.
+  - `List`, `Detail`, `ListByCategory`, `ListByAuthor`, and `ListLikedByUser` build post read models.
 
-Before adding OAuth, identify exactly where external authentication must connect to the current forum.
+- `migrations/002_forum_content.sql`
+  - Creates the existing `posts` table.
 
-### Understand
+- `internal/database/migrate.go`
+  - Applies numbered migrations in order.
+  - Add a new migration file instead of editing old applied migrations.
 
-Trace the current flow:
+- `templates/new_post.html`
+  - Current post form.
 
-```text
-POST /login
-→ LoginHandler
-→ LoginService
-→ UserRepository
-→ bcrypt
-→ SessionRepository
-→ SessionManager
-→ forum_session cookie
-```
+- `templates/post.html`
+  - Post detail page visible to users and guests.
 
-Answer:
+- `templates/home.html`
+  - Post listing page.
 
-- Where is the session UUID created?
-- Where is it stored in SQLite?
-- Where is the cookie written?
-- How does authentication middleware recover the current user?
-- Which existing code should OAuth reuse after the provider identifies a user?
+- `static/`
+  - Already served by the router at `/static/`.
+  - A new `static/uploads/` folder can be used for uploaded images.
 
-### Implementation
-
-No production changes yet.
-
-### Verification
-
-You should be able to explain:
-
-> OAuth replaces the password-verification part of login, but after identity is established the forum can reuse its normal session system.
-
-### Commit
-
-```text
-docs: map existing authentication flow
-```
+- `go.mod`
+  - Already includes `github.com/google/uuid`.
+  - No new third-party package is needed.
 
 ---
 
-# Phase 2 — OAuth configuration
+## Fixed Decisions
 
-### Goal
+- Keep backend in Go.
+- Use only allowed packages already compatible with the subject.
+- Store image files on disk, not as BLOBs in SQLite.
+- Store only the public image path in the database.
+- Use a new migration such as `migrations/005_post_images.sql`.
+- Keep uploads under `static/uploads/`.
+- Add `static/uploads/` to `.gitignore`, but keep the directory with a placeholder such as `.gitkeep`.
+- Use UUID filenames so two users cannot overwrite each other's images.
+- Do not trust the browser's filename or `Content-Type`.
+- Detect the real file type from file bytes using `http.DetectContentType`, then
+  confirm that it is a decodable JPEG, PNG, or GIF with the standard-library
+  image decoders.
+- Do not rely on `Content-Length` or `ParseMultipartForm`'s memory argument as
+  an upload-size limit.
+- Bound the complete HTTP request and independently enforce the exact image
+  limit while streaming at most `MaxImageSize + 1` bytes.
+- Accept an image of exactly 20 MiB and reject one of 20 MiB plus one byte.
+- If no image is uploaded, post creation should work exactly as before.
+- Treat an absent file part as “no image”; reject a selected zero-byte file as
+  an invalid image.
+- If image validation fails, do not create the post.
+- If the database insert fails after saving a file, clean up the saved file.
+- Store text-only image paths as SQL `NULL` and expose them to templates as an
+  empty string.
+- Write uploads through a temporary file and atomically rename them only after
+  validation and copying succeed.
+- Persist uploads across Docker container replacement.
+- Keep guests able to view post images.
+- Do not add JavaScript.
 
-Add configuration required by GitHub and Google without hardcoding secrets.
+---
 
-### Add configuration
+# Phase 0 — Align Project Documentation
 
-Examples:
+## Goal
+
+Make the repository instructions describe the image-upload extension before
+production work begins.
+
+## Documentation Changes
+
+Update `docs/AGENTS.md` and `docs/PRD.md` so they treat the completed
+forum-authentication implementation as the baseline and image upload as the
+current extension.
+
+The source-of-truth order should become:
+
+1. `docs/exercise-image-upload.md`
+2. `docs/audit-image-upload.md`
+3. `docs/PRD.md`
+4. `docs/tasks.md`
+5. `README.md`
+6. existing tests and code
+
+Remove stale statements that prohibit image uploads. Preserve authentication,
+OAuth, sessions, forum behavior, and all existing security requirements as
+regression requirements rather than reimplementing them.
+
+Remove references to deleted authentication exercise/audit files and to
+`docs/setup-guide.md` unless that setup guide is intentionally restored.
+
+## Acceptance Checks
+
+- no active project document says image upload is out of scope
+- no source-of-truth entry points to a deleted document
+- the PRD records the exact supported formats, size boundary, storage approach,
+  public visibility, and Docker persistence decision
+
+## Suggested Commit
 
 ```text
-GITHUB_CLIENT_ID
-GITHUB_CLIENT_SECRET
-GITHUB_REDIRECT_URL
-
-GOOGLE_CLIENT_ID
-GOOGLE_CLIENT_SECRET
-GOOGLE_REDIRECT_URL
-```
-
-### Understand
-
-Difference between:
-
-- Client ID
-- Client Secret
-- Redirect URI
-
-The secret belongs only on the server.
-
-### Tests
-
-Test:
-
-- all variables for a provider load successfully
-- a provider is disabled when all of its variables are absent
-- partially configured provider credentials return a startup error
-- malformed or non-HTTP(S) redirect URLs are rejected
-- the UI can determine which providers are enabled without seeing secrets
-
-### Security
-
-Add/update:
-
-```text
-.env
-.env.*
-```
-
-in `.gitignore`.
-
-Never commit real OAuth secrets.
-
-Add a secret-free `.env.example`. Docker/Compose configuration must pass values
-from the environment and must not contain real credentials.
-
-### Commit
-
-```text
-feat: add oauth configuration
+docs: define image upload extension requirements
 ```
 
 ---
 
-# Phase 3 — OAuth account schema
+# Phase 1 — Baseline And Flow Check
 
-### Goal
+## Goal
 
-Give the database a clean way to associate local forum users with external providers.
+Confirm the current project works before changing it.
 
-### Existing user compatibility
+## Understand
 
-The current `users.password_hash` column is `NOT NULL`, but a first-time OAuth
-user has no password. Add a new migration that safely changes it to nullable.
-Do not edit an already-applied migration and do not store a fake password hash.
-
-Update user scanning and password login so a `NULL` hash is represented safely.
-An OAuth-only account attempting password login receives the same generic
-invalid-credentials response as any other incorrect login.
-
-### OAuth account table
-
-Create a migration for something similar to:
+Trace this current flow:
 
 ```text
-oauth_accounts
---------------
-id
-user_id
-provider
-provider_user_id
-email
-created_at
+GET /posts/new
+-> PostCreationHandler.handleGet
+-> CategoryRepository.All
+-> templates/new_post.html
+
+POST /posts
+-> PostCreationHandler.handlePost
+-> r.ParseForm
+-> validation.PostInput
+-> PostService.Create
+-> PostRepository.Create
+-> redirect to /posts/{id}
 ```
 
-Important constraint:
+Also confirm:
 
-```text
-UNIQUE(provider, provider_user_id)
-UNIQUE(user_id, provider)
-```
+- `internal/app/app.go` wires `http.FileServer(http.Dir(resolveProjectPath("static")))`.
+- `/static/` is already a public route.
+- `templates/post.html` is visible to guests.
 
-Also require:
+## Implementation
 
-- `provider`, `provider_user_id`, and `email` are non-empty
-- `user_id` references `users(id)` with `ON DELETE CASCADE`
-- provider email is normalized before storage
+No production code changes.
 
-### Understand
+## Acceptance Checks
 
-Keep two concepts separate:
-
-```text
-users
-→ local forum identity
-
-oauth_accounts
-→ external identity connected to that user
-```
-
-This allows one local user to eventually have multiple authentication methods.
-Account-linking itself is outside this project, so the login flow never adds an
-OAuth identity to an existing user automatically.
-
-### Tests
-
-Migration test:
-
-- table exists
-- `users.password_hash` accepts `NULL` without weakening password accounts
-- foreign key points to users
-- duplicate `(provider, provider_user_id)` is rejected
-- duplicate `(user_id, provider)` is rejected
-- deleting a user deletes its OAuth identities
-- an OAuth-only user cannot log in through the password form
-
-### Commit
-
-```text
-feat: add oauth account migration
-```
-
----
-
-# Phase 4 — OAuth account repository
-
-### Goal
-
-Keep OAuth SQL out of handlers and services.
-
-### Repository responsibilities
-
-Add operations such as:
-
-```text
-FindByProviderUserID
-Create
-FindByUserID
-CreateUserWithOAuthAccount
-```
-
-Do not put HTTP or provider API logic here.
-
-`CreateUserWithOAuthAccount` owns one transaction that creates the local user
-with a `NULL` password hash and creates its OAuth identity. If either insert
-fails, neither row remains. Translate uniqueness failures into stable repository
-errors so the service can distinguish provider identity, email, and username
-conflicts without parsing driver messages.
-
-### Understand
-
-```text
-Repository = how OAuth account data is stored/retrieved
-Service    = what authentication behavior should happen
-```
-
-### Tests
-
-Use real temporary SQLite tests.
-
-Cover:
-
-- create OAuth account
-- find OAuth account
-- unknown account
-- both uniqueness constraints
-- first-time user and OAuth account commit together
-- either insert failure rolls the whole transaction back
-- concurrent duplicate attempts produce one account and one stable conflict
-
-### Commit
-
-```text
-feat: add oauth account repository
-```
-
----
-
-# Phase 5 — OAuth provider abstraction
-
-### Goal
-
-Define the information the forum actually needs from an OAuth provider.
-
-### Suggested model
-
-Conceptually:
-
-```text
-OAuthUser
-- Provider
-- ProviderUserID
-- VerifiedEmail
-- SuggestedUsername
-```
-
-Define a provider interface so GitHub and Google expose the same operations to
-the handler/service.
-
-Conceptually:
-
-```text
-AuthorizationURL(...)
-ExchangeCode(...)
-FetchUser(...)
-```
-
-Provider implementations must use an injected `http.Client` and configurable
-endpoint URLs. Production uses the official endpoints; tests use local fake HTTP
-servers and never contact GitHub or Google.
-
-Every provider request must have a timeout, check the response status, limit the
-response body size, and reject malformed or incomplete JSON. Public errors must
-not contain response bodies, tokens, codes, client secrets, or internal details.
-
-### Understand
-
-The forum should not care whether the identity came from GitHub or Google after it has been normalized into an `OAuthUser`.
-
-### Tests
-
-Unit-test provider-independent logic.
-
-Do not contact real GitHub/Google APIs in normal unit tests.
-
-### Commit
-
-```text
-feat: define oauth provider contract
-```
-
----
-
-# Phase 6 — GitHub OAuth: authorization start
-
-### Goal
-
-Implement only the first half of GitHub OAuth.
-
-### Route
-
-```text
-GET /auth/github
-```
-
-### Flow
-
-```text
-Browser
-→ GET /auth/github
-→ generate random state
-→ store state temporarily
-→ redirect to GitHub authorization URL
-```
-
-### Security concept — state
-
-Understand why:
-
-```text
-state sent to provider
-        ↓
-provider returns same state
-        ↓
-callback verifies it
-```
-
-Use this fixed policy:
-
-- generate at least 32 random bytes with `crypto/rand` and encode them safely
-- bind the state to the initiating browser with an `HttpOnly`, `SameSite=Lax`
-  cookie using the configured `Secure` setting
-- use a small concurrency-safe in-memory `OAuthStateStore` for this single-process
-  application; store a hash of the state together with provider, PKCE verifier,
-  and expiry, never the raw state
-- expire authorization-flow data after 10 minutes; an application restart may
-  safely invalidate unfinished OAuth attempts
-- consume state atomically so a callback cannot be replayed
-- compare returned and expected state in constant time
-- clear the state cookie on success and every callback failure
-- keep GitHub and Google state separate so one provider cannot consume the
-  other's authorization attempt
-
-Use PKCE S256 too: generate a cryptographically random verifier, send its SHA-256
-challenge on authorization, retain the verifier only for this short-lived flow,
-and send it during code exchange. Never log state values or PKCE material.
-
-### Tests
-
-Verify:
-
-- route returns redirect
-- redirect points to expected provider authorization endpoint
-- state exists
-- required OAuth parameters are present
-- state is browser-bound, expires, and is single-use
-- PKCE uses `code_challenge_method=S256`
-- a state generated for Google cannot be used for GitHub
-
-### Commit
-
-```text
-feat: start github oauth authorization
-```
-
----
-
-# Phase 7 — GitHub OAuth: callback and provider API
-
-### Goal
-
-Complete communication with GitHub.
-
-### Route
-
-```text
-GET /auth/github/callback
-```
-
-### Flow
-
-```text
-GitHub callback
-→ verify state
-→ read authorization code
-→ exchange code for access token
-→ call GitHub user API
-→ obtain stable numeric provider user ID
-→ fetch a primary verified email from /user/emails
-→ normalize to OAuthUser
-```
-
-Request the minimum `user:email` scope. Do not treat the GitHub login name or
-email address as the provider identity. If no primary verified email is
-available, stop with a safe authentication error and do not create local data.
-
-### Important
-
-Do not log:
-
-- authorization codes
-- access tokens
-- refresh tokens
-- client secrets
-- OAuth state
-- PKCE verifier/challenge values
-
-### Tests
-
-Use fake HTTP servers/provider mocks.
-
-Cover:
-
-- valid callback
-- wrong/missing state
-- expired or replayed state
-- provider-denied authorization (`error` callback parameter)
-- missing code
-- token exchange failure
-- non-success provider status
-- malformed or oversized provider response
-- provider user request failure
-- missing provider user ID
-- missing or unverified primary email
-- HTTP client timeout
-
-### Commit
-
-```text
-feat: complete github oauth callback
-```
-
----
-
-# Phase 8 — OAuth login service
-
-### Goal
-
-Connect external identity to the forum's local user system.
-
-### Business logic
-
-Given an `OAuthUser`:
-
-```text
-existing oauth account?
-    ↓ yes
-load local user
-    ↓
-create forum session
-```
-
-For a first-time OAuth user:
-
-```text
-no oauth account
-→ require normalized, provider-verified email
-→ reject if that email already belongs to any local user
-→ generate an available local username
-→ transactionally create local user + oauth_accounts row
-→ create forum session
-```
-
-### Fixed email and account-linking policy
-
-Never use matching email as proof that two accounts have the same owner.
-
-If the verified provider email already belongs to a password account or a
-different OAuth identity, return `409 Conflict` with a safe message directing
-the user to sign in using the original method. Do not reveal database details
-and do not create or link any rows. A future explicit account-linking flow is
-outside this project.
-
-Returning OAuth users are found by `(provider, provider_user_id)`. A later email
-or username change at the provider must not create a second local user or change
-which local account is selected.
-
-### Username policy
-
-Build the local username from the provider's suggested username/name:
-
-1. trim whitespace and replace unsupported/spacing characters with `-`;
-2. fall back to `<provider>-user` if fewer than 3 usable characters remain;
-3. truncate to the existing 32-character limit;
-4. if occupied, reserve space and try `-2`, `-3`, and so on;
-5. handle the final uniqueness race inside the transactional repository flow.
-
-The generated username is display data only; it is never an authentication key.
-
-### Reuse
-
-The service should reuse the existing:
-
-```text
-SessionRepository
-SessionManager
-one-active-session behavior
-```
-
-where possible.
-
-### Tests
-
-Cover:
-
-- existing OAuth user login
-- first OAuth login
-- session creation
-- duplicate provider identity
-- verified provider email requirement
-- password-account and other-provider email collisions return `409`
-- collision rejection leaves no partial user or OAuth account
-- username normalization, fallback, truncation, suffixing, and uniqueness race
-- provider email/username changes do not duplicate an existing OAuth user
-- OAuth-only accounts fail password login with the generic credentials response
-
-### Commit
-
-```text
-feat: add oauth login service
-```
-
----
-
-# Phase 9 — Connect GitHub callback to forum session
-
-### Goal
-
-Finish the complete GitHub login flow.
-
-### Full flow
-
-```text
-GET /auth/github
-→ GitHub
-→ /auth/github/callback
-→ OAuthLoginService
-→ local user
-→ session UUID
-→ forum_session cookie
-→ 303 /
-```
-
-### Understand
-
-At this point GitHub is no longer needed for ordinary forum requests.
-
-After login:
-
-```text
-Browser
-→ forum_session cookie
-→ Authentication Middleware
-→ SessionRepository
-→ local user
-```
-
-exactly like the original login flow.
-
-### HTTP outcomes
-
-- successful callback: `303 See Other` to `/`
-- missing, malformed, denied, expired, mismatched, or replayed callback: `400 Bad Request`
-- existing-email collision: `409 Conflict`
-- provider timeout or invalid upstream response: `502 Bad Gateway`
-- unexpected local persistence/session failure: safe `500 Internal Server Error`
-
-None of these responses may expose provider payloads or internal errors.
-
-### Integration tests
-
-Verify:
-
-- successful OAuth login sets forum session
-- first login creates exactly one local user and OAuth account
-- repeat login reuses them and replaces the prior active forum session
-- authenticated page recognizes user
-- invalid callback does not authenticate user
-- failure after writing a cookie clears that cookie and leaves no usable session
-
-### Commit
-
-```text
-feat: integrate github login with forum sessions
-```
-
----
-
-# Phase 10 — Add GitHub login UI
-
-### Goal
-
-Expose GitHub authentication in the existing interface.
-
-### UI
-
-Add:
-
-```text
-Continue with GitHub
-```
-
-to login and/or registration page.
-
-Show the link only when GitHub is fully configured. A disabled provider must not
-expose a broken login route or UI control.
-
-Preserve existing:
-
-```text
-email + password
-```
-
-authentication.
-
-No JavaScript is necessary.
-
-### Tests
-
-Verify the link targets:
-
-```text
-/auth/github
-```
-
-and existing login/register forms still work.
-
-Also verify the link is absent when GitHub configuration is disabled.
-
-### Commit
-
-```text
-feat: add github login interface
-```
-
----
-
-# Phase 11 — Google OAuth provider
-
-### Goal
-
-Repeat the now-understood OAuth flow for Google.
-
-### Routes
-
-```text
-GET /auth/google
-GET /auth/google/callback
-```
-
-### Identity requirements
-
-Request only `openid email profile`. Use Google's stable `sub` claim as
-`ProviderUserID`; never use email as the provider identity. Require a non-empty
-email and `email_verified=true`. Missing or unverified email stops the flow
-without creating local data or a forum session.
-
-### Reuse
-
-Do **not** duplicate GitHub business logic.
-
-Only provider-specific behavior should differ:
-
-```text
-authorization endpoint
-token endpoint
-profile endpoint
-provider response parsing
-```
-
-The rest should reuse:
-
-```text
-OAuthUser
-OAuthLoginService
-OAuthAccountRepository
-existing forum sessions
-```
-
-### Tests
-
-Mirror the GitHub provider tests:
-
-- authorization redirect
-- state validation
-- state expiry and replay rejection
-- PKCE S256 and verifier exchange
-- code exchange
-- profile retrieval
-- stable `sub` mapping
-- missing or unverified email rejection
-- provider denial, timeout, non-success status, malformed JSON, and oversized body
-- error cases
-
-### Commit
-
-```text
-feat: add google oauth provider
-```
-
----
-
-# Phase 12 — Google login integration and UI
-
-### Goal
-
-Complete Google authentication end-to-end.
-
-### UI
-
-Add:
-
-```text
-Continue with Google
-```
-
-Show the link only when Google is fully configured. A disabled provider must not
-expose a broken login route or UI control.
-
-### Integration
-
-Verify:
-
-```text
-Google
-→ callback
-→ local user
-→ forum session
-→ middleware
-→ authenticated forum
-```
-
-### Regression tests
-
-Ensure:
-
-- GitHub still works
-- password login still works
-- registration still works
-- logout works for OAuth-authenticated users too
-
-### Commit
-
-```text
-feat: integrate google oauth login
-```
-
----
-
-# Phase 13 — OAuth security audit
-
-### Goal
-
-Review the new authentication flow as a security feature, not only as working code.
-
-### Check
-
-- OAuth `state` has at least 32 random bytes and is validated in constant time.
-- State is bound to the initiating browser, expires after 10 minutes, is
-  provider-specific, is atomically single-use, and is cleared on every callback.
-- Authorization code flow uses PKCE S256 and short-lived verifier storage.
-- Client secrets are not committed.
-- Access tokens are not logged.
-- Access and refresh tokens are not persisted.
-- Authorization codes are not logged.
-- State and PKCE material are not logged.
-- Redirect URIs are fixed/configured.
-- Provider HTTP clients have timeouts and response-size limits.
-- Provider errors and response bodies are not exposed to users.
-- Session cookie remains `HttpOnly`.
-- Production session cookie uses `Secure`.
-- Appropriate `SameSite` policy remains enabled.
-- Existing sessions still expire.
-- Logout invalidates the local forum session.
-- Provider identity is based on stable provider user ID, not only username.
-- GitHub and Google emails must be verified before first registration.
-- Email collisions are rejected and never trigger automatic linking.
-- First-time user and OAuth identity creation is transactional.
-- OAuth-only users do not have fake password hashes.
-
-### Tests
-
-Add missing negative/security cases.
-
-### Commit
-
-```text
-test: harden oauth authentication flow
-```
-
----
-
-# Phase 14 — Full HTTP integration flows
-
-### Goal
-
-Test OAuth as part of the whole forum rather than as isolated functions.
-
-### Scenarios
-
-GitHub:
-
-```text
-guest
-→ start OAuth
-→ callback
-→ logged in
-→ access protected route
-→ logout
-→ protected route becomes unauthorized
-```
-
-Google:
-
-Same flow.
-
-Also verify:
-
-- existing password user flow
-- two different browser sessions
-- malformed callback
-- rejected OAuth state
-- expired and replayed OAuth state
-- callback from the wrong provider
-- provider-denied authorization
-- verified-email and email-collision failures
-- provider failure does not create a session
-- every failed first login leaves no partial user or OAuth account
-- first and repeat OAuth login obey the one-active-session rule
-- OAuth users can create posts/comments/reactions and see their content after
-  logout, as required by the authentication audit
-
-### Commit
-
-```text
-test: cover oauth http flows
-```
-
----
-
-# Phase 15 — README and setup guide
-
-### Goal
-
-Make another developer able to configure the project without reading the implementation.
-
-### Document
-
-- What OAuth is doing in this forum
-- GitHub OAuth setup
-- Google OAuth setup
-- required environment variables
-- callback URLs
-- local run
-- Docker/Compose configuration if used
-- secrets policy
-- architecture flow
-- test commands
-
-### Commit
-
-```text
-docs: document oauth authentication
-```
-
----
-
-# Phase 16 — Final audit
-
-### Code quality
+Run:
 
 ```bash
-gofmt -w .
-go vet ./...
 go test ./...
-go test -race ./...
-go build ./...
-docker build -t forum-authentication .
 ```
 
-### Functional audit
+If local permissions block Go cache creation, use temporary caches so the
+working tree is not polluted:
 
-Verify manually:
-
-- email/password registration
-- email/password login
-- GitHub login
-- Google login
-- OAuth first login
-- OAuth repeat login
-- protected routes
-- logout
-- posts/comments/reactions/filters remain functional
-- both real provider flows work with registered development credentials
-- a production-like run uses HTTPS and secure cookies
-
-### Database audit
-
-Check:
-
-```text
-users
-oauth_accounts
-sessions
+```bash
+GOCACHE=/tmp/forum-image-upload-gocache \
+GOPATH=/tmp/forum-image-upload-gopath \
+go test ./...
 ```
 
-Verify OAuth-only users have `NULL` password hashes, provider IDs are stable,
-failed attempts leave no orphan rows, and only one active session exists per
-user.
+On PowerShell:
 
-### Security audit
-
-Check repository history/current files for:
-
-```text
-client secrets
-access tokens
-.env
-database files
-logs containing tokens
+```powershell
+$env:GOCACHE=Join-Path $env:TEMP "forum-image-upload-gocache"
+$env:GOPATH=Join-Path $env:TEMP "forum-image-upload-gopath"
+go test ./...
 ```
 
-Also verify `.env.example` contains names/placeholders only, Docker receives
-secrets at runtime, provider tokens are absent from SQLite, and every command in
-the README works from a clean checkout.
-
-### Final commit
+## Suggested Commit
 
 ```text
-chore: complete oauth authentication audit
+docs: map image upload extension points
 ```
 
 ---
 
-# Final mental model
+# Phase 2 — Database Field For Post Images
+
+## Goal
+
+Allow posts to remember an optional image path.
+
+## Implementation
+
+Add a new migration:
 
 ```text
-PASSWORD LOGIN
-
-email/password
-→ bcrypt verification
-→ local user
-→ forum session
-→ cookie
-
-
-OAUTH LOGIN
-
-Google/GitHub
-→ provider authenticates user
-→ callback proves successful OAuth flow
-→ forum resolves local user
-→ forum session
-→ cookie
+migrations/005_post_images.sql
 ```
 
-Both flows converge here:
+Suggested schema change:
+
+```sql
+ALTER TABLE posts
+ADD COLUMN image_path TEXT;
+```
+
+Keep it nullable because old posts and text-only posts have no image.
+
+Use one consistent nullable-value policy:
+
+- write `NULL` when `ImagePath` is empty, for example with `NULLIF(?, '')` or a
+  nullable query argument
+- read it into the Go read models with `COALESCE(p.image_path, '')` or
+  `sql.NullString`
+- never scan a SQL `NULL` directly into a plain Go string
+
+Update read/write models:
+
+- Add `ImagePath string` to `repository.PostListItem`.
+- Add `ImagePath string` to `repository.PostDetail`.
+
+Add `ImagePath string` to `internal/model/post.go` only if that domain model is
+used by the implemented flow; it is not currently required by the post read
+queries.
+
+Update repository queries:
+
+- `Create` should insert `image_path`.
+- `List` should select `p.image_path`.
+- `Detail` should select `p.image_path`.
+- `ListByCategory` should select `p.image_path`.
+- `ListByAuthor` should select `p.image_path`.
+- `ListLikedByUser` should select `p.image_path`.
+
+## Tests
+
+Add or update tests in:
+
+- `internal/database/content_schema_test.go`
+- `internal/repository/posts_test.go`
+
+Cover:
+
+- migration adds `posts.image_path`
+- upgrading a database containing a pre-migration post preserves that post
+- creating a text-only post stores SQL `NULL` and reads it as an empty string
+- creating a post with an image path returns that path from `Detail`
+- list/filter methods preserve image paths
+- existing post tests still pass
+
+## Acceptance Checks
+
+```bash
+go test ./internal/database ./internal/repository
+```
+
+## Suggested Commit
 
 ```text
-forum_session
-→ authentication middleware
-→ session row
-→ user_id
-→ current user
+feat: add optional post image field
 ```
 
-That convergence is the key architectural idea of the optional project.
+---
+
+# Phase 3 — Image Upload Rules
+
+## Goal
+
+Create one small, testable place that understands image validation.
+
+## Implementation
+
+Add a focused package or file for image upload rules, for example:
+
+```text
+internal/upload/image.go
+internal/upload/image_test.go
+```
+
+Suggested responsibilities:
+
+- maximum size constant: `20 * 1024 * 1024`
+- allowed MIME types:
+  - `image/jpeg`
+  - `image/png`
+  - `image/gif`
+- map detected MIME type to safe extension:
+  - `.jpg`
+  - `.png`
+  - `.gif`
+- exported stable errors:
+  - image too large
+  - unsupported image type
+  - empty image
+  - unreadable image
+
+The validation should inspect the actual file bytes, not only the filename or
+multipart `Content-Type`. Use `http.DetectContentType` as an initial
+classification and then use `image.DecodeConfig` with the standard-library
+JPEG, PNG, and GIF decoders to reject truncated or fake files that only contain
+a recognizable header.
+
+The size check must read through a bounded reader of `MaxImageSize + 1` bytes.
+It must work when `Content-Length` is missing or false. It must not require the
+whole upload to be held in memory.
+
+## Tests
+
+Cover:
+
+- accepts small, valid JPEG image bytes
+- accepts small, valid PNG image bytes
+- accepts small, valid GIF image bytes
+- rejects unsupported content
+- rejects truncated or fake JPEG/PNG/GIF content
+- accepts a file of exactly 20 MiB when it is otherwise a valid supported image
+- rejects a file of 20 MiB plus one byte
+- enforces the limit when the input size is not declared in advance
+- handles a missing optional upload as “no image”
+- rejects a present zero-byte upload as an invalid image
+- preserves every byte so the saved file is not corrupted after detection
+
+## Acceptance Checks
+
+```bash
+go test ./internal/upload
+```
+
+## Suggested Commit
+
+```text
+feat: validate post image uploads
+```
+
+---
+
+# Phase 4 — Disk Storage For Uploaded Images
+
+## Goal
+
+Save valid images safely under `static/uploads/`.
+
+## Implementation
+
+Extend the upload package or add a small storage type, for example:
+
+```text
+internal/upload/storage.go
+```
+
+Suggested behavior:
+
+- ensure `static/uploads/` exists on startup or before saving
+- generate filenames using `github.com/google/uuid`
+- save files with a safe extension based on detected content type
+- create the directory with predictable permissions such as `0755`
+- create a temporary file in the destination filesystem, copy and validate the
+  bounded input, close it, then atomically rename it to the final UUID filename
+- use predictable file permissions such as `0644`
+- remove temporary or partial files on every failed read, validation, close, or
+  rename operation
+- return a browser path like:
+
+```text
+/static/uploads/{uuid}.png
+```
+
+Do not use the original uploaded filename for storage.
+
+Expose deletion through the storage abstraction rather than letting the HTTP
+handler translate arbitrary public paths into filesystem paths. A small
+handler-facing interface can conceptually provide:
+
+```text
+Save(image input) -> public path
+Delete(public path)
+```
+
+`Delete` must only accept paths created inside the configured upload directory.
+Cleanup errors should be logged safely and must never expose filesystem paths to
+the browser.
+
+Update `.gitignore`:
+
+```text
+static/uploads/*
+!static/uploads/.gitkeep
+```
+
+Add:
+
+```text
+static/uploads/.gitkeep
+```
+
+## Tests
+
+Use `t.TempDir()` for storage tests.
+
+Cover:
+
+- saves a valid image
+- generated filename is unique
+- returned path starts with `/static/uploads/`
+- unsupported file is not saved
+- oversized file is not saved
+- storage creates the upload directory if missing
+- read/copy failure leaves no partial file
+- invalid image leaves no temporary file
+- deletion removes a stored image
+- deletion rejects paths outside the configured upload directory
+- generated image bytes are identical to the accepted input
+
+## Acceptance Checks
+
+```bash
+go test ./internal/upload
+```
+
+## Suggested Commit
+
+```text
+feat: store uploaded post images
+```
+
+---
+
+# Phase 5 — Service Contract For Optional Image Path
+
+## Goal
+
+Extend post creation without pushing HTTP upload details into the service or repository.
+
+## Implementation
+
+Update `validation.PostInput`:
+
+```text
+Title
+Body
+CategoryIDs
+ImagePath
+```
+
+Keep image binary/file handling outside `validation.ValidatePost`; that function should still validate post text/category data and treat `ImagePath` as already-safe internal data.
+
+Only the upload storage may produce a non-empty `ImagePath`; never populate it
+from an ordinary form text value supplied by the browser.
+
+Update `service.PostCreator` and `PostService.Create` so the repository receives the validated image path.
+
+Suggested direction:
+
+```text
+PostService.Create(authorID, validation.PostInput)
+-> ValidatePost
+-> posts.Create(authorID, title, body, categoryIDs, imagePath)
+```
+
+## Tests
+
+Update:
+
+- `internal/validation/post_test.go`
+- `internal/service/post_test.go`
+
+Cover:
+
+- text-only post still works
+- post with `ImagePath` passes it to repository
+- invalid title/body/category still stops before repository
+- guest still cannot create a post
+
+## Acceptance Checks
+
+```bash
+go test ./internal/validation ./internal/service
+```
+
+## Suggested Commit
+
+```text
+feat: pass optional image path through post service
+```
+
+---
+
+# Phase 6 — Multipart Post Creation Handler
+
+## Goal
+
+Make `POST /posts` accept normal form fields plus an optional image.
+
+## Implementation
+
+Update `templates/new_post.html`:
+
+```html
+<form method="post" action="/posts" enctype="multipart/form-data">
+```
+
+Add a file input:
+
+```html
+<input
+    id="image"
+    name="image"
+    type="file"
+    accept="image/jpeg,image/png,image/gif"
+>
+```
+
+Add visible help text next to the input explaining that the image is optional,
+only JPEG/PNG/GIF are accepted, and the maximum size is 20 MB. The `accept`
+attribute is browser guidance only; backend validation remains mandatory.
+
+Update `internal/web/handler/post_creation.go`:
+
+- wrap the request body with `http.MaxBytesReader` before multipart parsing;
+  allow enough bounded overhead for multipart fields while enforcing the exact
+  image limit separately
+- replace `r.ParseForm()` with multipart-aware parsing and call
+  `r.MultipartForm.RemoveAll()` when temporary multipart files may exist
+- do not use `Content-Length` as proof that the request is safe
+- keep existing category parsing behavior
+- call upload validation/storage only when a file is present
+- pass the returned image path through `validation.PostInput.ImagePath`
+- return `400 Bad Request` with a useful message for:
+  - image too large
+  - unsupported image type
+  - malformed multipart form
+- return `500 Internal Server Error` for unexpected storage failure
+- if post creation fails for any reason after image save, including ordinary
+  title/body/category validation, delete the saved image file
+- distinguish expected validation failures from unexpected service/database
+  failures instead of mapping every service error to `400`
+
+Keep the handler responsible for HTTP parsing. Keep the service responsible for post business validation. Keep the repository responsible for SQL only.
+
+Preserve URL-encoded text-only post submissions if practical so existing clients
+and regression tests continue to work. The browser form itself should use
+multipart encoding.
+
+Use clear, stable messages for expected upload errors. For example:
+
+```text
+Image is too big. Maximum size is 20 MB.
+Only JPEG, PNG, and GIF images are supported.
+The selected image could not be read.
+```
+
+## Tests
+
+Update `internal/web/handler/posts_test.go` or add a new focused handler test file.
+
+Cover:
+
+- existing URL-encoded text-only post test still passes
+- authenticated user can create a multipart post without image
+- authenticated user can create a multipart post with PNG/JPEG/GIF
+- invalid category still returns `400`
+- oversized image returns `400` and does not call service
+- exactly 20 MiB is accepted and 20 MiB plus one byte is rejected
+- chunked or unknown-length oversized input is rejected
+- an excessive complete multipart request is rejected before unbounded parsing
+- unsupported image returns `400` and does not call service
+- selected zero-byte image returns `400` and does not call service
+- malformed multipart input stores nothing and does not call service
+- guest upload returns `401`
+- validation failure after upload deletes the stored file
+- unexpected service/database failure after upload deletes the stored file and
+  returns a safe `500`
+- multipart temporary files are cleaned up
+
+## Acceptance Checks
+
+```bash
+go test ./internal/web/handler
+```
+
+## Suggested Commit
+
+```text
+feat: accept optional image in post form
+```
+
+---
+
+# Phase 7 — Render Images For Guests And Users
+
+## Goal
+
+Show saved images on post pages, and optionally show a preview in the feed.
+
+## Implementation
+
+Update `templates/post.html`:
+
+```html
+{{if .Post.ImagePath}}
+    <img
+        class="post-image"
+        src="{{.Post.ImagePath}}"
+        alt="Post image"
+    >
+{{end}}
+```
+
+Optionally update `templates/home.html` with a smaller preview:
+
+```html
+{{if .ImagePath}}
+    <img
+        class="post-image-preview"
+        src="{{.ImagePath}}"
+        alt="Post image preview"
+    >
+{{end}}
+```
+
+Update `static/style.css` with responsive image styles:
+
+```css
+.post-image,
+.post-image-preview {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    border-radius: 12px;
+}
+```
+
+## Tests
+
+Update:
+
+- `internal/web/handler/posts_test.go`
+- `internal/web/view/templates_test.go`
+
+Cover:
+
+- post detail renders `<img>` when `ImagePath` exists
+- post detail does not render broken image markup when `ImagePath` is empty
+- the create-post form clearly states the optional image, supported types, and
+  20 MB limit
+- a guest request to the stored image URL returns `200`, the expected
+  `Content-Type`, and bytes identical to the upload
+- guests can view the post and its image after the creating user logs out
+- public pages still contain no JavaScript
+- user text is still escaped
+
+## Acceptance Checks
+
+```bash
+go test ./internal/web/handler ./internal/web/view
+```
+
+## Suggested Commit
+
+```text
+feat: render post images
+```
+
+---
+
+# Phase 8 — Full Integration And Error Handling
+
+## Goal
+
+Verify the complete user story through the real router and app wiring.
+
+## Implementation
+
+Update app wiring if needed so the post creation handler receives upload storage configuration.
+
+Possible constructor direction:
+
+```text
+NewPostCreationHandler(postService, categories, renderer, imageStorage)
+```
+
+Use `resolveProjectPath("static/uploads")` or an equivalent project-root-safe path when wiring production storage.
+
+The Docker image currently stores `/app/static/uploads` only in the writable
+container layer. Update `compose.yml` to mount a dedicated named volume at:
+
+```text
+/app/static/uploads
+```
+
+Declare that volume next to the existing database volume. Ensure the non-root
+forum user can write to it. Uploaded images must remain available when the
+Compose container is replaced, not merely while one container process remains
+alive.
+
+Keep all website errors safe:
+
+- too large: clear `400` message
+- unsupported type: clear `400` message
+- malformed upload: `400`
+- unauthenticated: `401`
+- unexpected save/database failure: safe `500`
+
+Do not expose filesystem paths, SQL errors, or internal stack details to users.
+
+## Tests
+
+Add integration coverage around the real HTTP stack where practical.
+
+Cover:
+
+- registered/logged-in user creates a post with an image
+- redirect goes to `/posts/{id}`
+- guest can open `/posts/{id}` and see the image
+- guest can request the image URL and receive matching bytes and MIME type
+- upload bigger than 20 MB fails and creates no post
+- unsupported upload fails and creates no post
+- text-only post still works
+- old posts without images still render correctly
+- replacing the Compose container does not remove previously uploaded images
+
+## Acceptance Checks
+
+```bash
+go test ./internal/web ./internal/app ./...
+```
+
+Manual browser check:
+
+1. Register or log in.
+2. Open `Create Post`.
+3. Create a post with title, body, category, and a PNG/JPEG/GIF image.
+4. Confirm redirect to the post detail page.
+5. Log out.
+6. Open the post again as guest.
+7. Confirm the image is visible.
+8. Try an unsupported file.
+9. Try an image larger than 20 MB.
+10. Create an image post through Docker Compose, replace the container, and
+    confirm that both the post and image still load.
+
+## Suggested Commit
+
+```text
+test: cover image upload flow
+```
+
+---
+
+# Phase 9 — Cleanup, Documentation, Final Audit
+
+## Goal
+
+Make the extension easy to review and safe to submit.
+
+## Implementation
+
+Update project docs:
+
+- `README.md`
+- `docs/AGENTS.md`
+- `docs/PRD.md`
+
+Phase 0 establishes the new source of truth. In this final phase, verify and
+refine those documents so they describe the implementation that was actually
+completed and tested.
+
+Mention:
+
+- supported image types
+- maximum upload size
+- where uploaded files are stored
+- uploads are ignored by git
+- how Docker persists uploaded files
+- how to run tests
+
+## Final Checks
+
+Run:
+
+```bash
+gofmt -w $(git ls-files '*.go')
+go test ./...
+go test -race ./...
+go vet ./...
+go build ./...
+docker build .
+```
+
+Optional manual checks:
+
+- no uploaded files committed
+- `.env` and database files still ignored
+- `static/uploads/.gitkeep` is the only committed file under uploads
+- no new dependency was added unnecessarily
+- no JavaScript was introduced
+- guests can see images but cannot create posts
+- authenticated users can create posts with or without images
+- failed upload attempts do not leave orphan database rows
+- failed database inserts do not leave orphan image files
+- exact 20 MiB images are accepted and 20 MiB plus one byte is rejected
+- unsupported SVG or text content is rejected with a clear message
+- Docker container replacement preserves uploaded images
+
+## Suggested Commit
+
+```text
+docs: document forum image uploads
+```
+
+---
+
+## Final Submission Checklist
+
+- `go test ./...` passes.
+- `go test -race ./...` passes.
+- `go vet ./...` passes.
+- `go build ./...` passes.
+- `docker build .` passes.
+- JPEG upload works.
+- PNG upload works.
+- GIF upload works.
+- File larger than 20 MB is rejected with a clear message.
+- The exact size boundary is tested independently of `Content-Length`.
+- Unsupported file type is rejected.
+- Truncated or fake image content is rejected.
+- Text-only post creation still works.
+- Registered users can create image posts.
+- Guests cannot create posts.
+- Guests can view images on existing posts.
+- Uploaded files are served only from `/static/uploads/`.
+- Database stores image paths, not image bytes.
+- Filenames are generated by the server, not trusted from users.
+- Partial and temporary files are cleaned up after failures.
+- Uploaded files survive Docker container replacement.
+- The code follows the existing handler/service/repository structure.
+
+## Suggested Final Commit
+
+```text
+chore: complete forum image upload extension
+```
