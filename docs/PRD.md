@@ -1,232 +1,278 @@
-# Forum Authentication Product Requirements
+# Forum Image Upload Product Requirements
 
 ## Purpose
 
-Extend the completed Go forum with new authentication methods. Users must be
-able to authenticate with GitHub or Google while the existing email/password
-registration and login continue to work.
+Extend the completed Go forum-authentication application so a registered user
+can create a post containing text and an optional image. The image must remain
+associated with the post and must be visible to both authenticated users and
+guests whenever they view that post.
 
-All three methods resolve to the same local user and existing forum session
-mechanism. After authentication, OAuth users have the same rights as every other
-registered user: they can create posts and comments, react, use personal filters,
-and log out.
+The completed authentication and forum behavior is the baseline and must not
+regress.
 
-The existing forum behavior is the baseline and must not regress.
+## Release Scope
 
-## Authentication Release
+### Supported post images
 
-### Supported methods
+The release supports these image formats:
 
-The application provides three authentication methods:
+- JPEG
+- PNG
+- GIF
 
-- email and password;
-- GitHub OAuth;
-- Google OAuth.
+Other formats, including SVG, are not supported by this release and must be
+rejected safely. The browser filename and declared content type are not trusted.
 
-GitHub and Google are mandatory. Other providers are outside this release.
+An image is optional. Existing text-only posts and new text-only post creation
+continue to work.
 
-### Existing password authentication
+### Size limit
 
-- Registration asks for email, username, and password.
-- Normalized email and username are unique; conflicts return `409 Conflict`.
-- Passwords are hashed with bcrypt and plaintext passwords are never stored.
-- Unknown email, wrong password, and an OAuth-only account used through the
-  password form all return the same `401 Unauthorized` response with
-  `Wrong email or password`.
-- Existing registration, login, session, and logout behavior remains supported.
-
-### OAuth authorization flow
-
-Both providers use the server-side authorization-code flow:
+The maximum image size is exactly 20 MiB:
 
 ```text
-browser
-→ GET /auth/{provider}
-→ provider authorization page
-→ GET /auth/{provider}/callback
-→ validate state and authorization code
-→ exchange code for access token
-→ fetch verified provider identity
-→ resolve/create local user
-→ create normal forum session
-→ set forum_session cookie
-→ 303 /
+20 * 1024 * 1024 = 20,971,520 bytes
 ```
 
-OAuth replaces password verification only. Provider access tokens are not forum
-sessions and are not used for later forum requests.
+The UI describes this as a 20 MB maximum. An image of exactly 20 MiB is
+accepted when otherwise valid. An image of 20 MiB plus one byte is rejected
+with a clear message that the image is too big.
 
-### Provider identity
+The application does not trust `Content-Length`. It bounds the complete request
+and independently measures the streamed image bytes, including for chunked or
+otherwise unknown-length requests. Multipart parsing must not permit unbounded
+memory or temporary-disk consumption.
 
-- GitHub accounts are identified by GitHub's stable numeric user ID.
-- GitHub login requests `user:email` and requires a primary verified email from
-  the authenticated user's email endpoint.
-- Google accounts are identified by the stable OpenID Connect `sub` value.
-- Google requests `openid email profile` and requires `email_verified=true`.
-- Email and provider username are profile attributes, never provider identity
-  keys.
-- Missing, blank, or unverified provider email stops first-time registration.
+### Image validity
 
-### Local account creation and collisions
+The backend determines the image type from its bytes using
+`http.DetectContentType`, maps only supported MIME types to safe extensions, and
+confirms the content is a decodable JPEG, PNG, or GIF with standard-library
+image decoders.
 
-- A returning OAuth user is resolved only by `(provider, provider_user_id)`.
-- A first-time OAuth login creates one local `users` row and one
-  `oauth_accounts` row in the same transaction.
-- OAuth-only users have a `NULL` password hash. The application never generates
-  a fake password or placeholder hash.
-- If the verified provider email already belongs to any local account, OAuth
-  login returns `409 Conflict` with a safe message instructing the user to use
-  the original sign-in method.
-- Accounts are never linked automatically. Explicit account linking is outside
-  this release.
-- Local usernames are derived from provider display data, normalized to the
-  existing 3–32 character rules, and given numeric suffixes when occupied.
-- Provider profile changes must not create a second local account.
+A missing file part means no image. A present zero-byte, truncated, malformed,
+unreadable, or unsupported file is rejected. Failed validation creates neither
+a post nor a stored image.
 
-### Forum sessions
+## User Experience
 
-- All successful authentication methods create the existing UUID-backed
-  `forum_session` cookie and server-side session row.
-- A user has at most one active session. A new password or OAuth login replaces
-  the previous session.
-- Cookies expire and use `HttpOnly`, `SameSite=Lax`, `Path=/`, and the configured
-  `Secure` setting.
-- Production configuration uses HTTPS and secure cookies.
-- Logout deletes the server-side session and clears the cookie for every login
-  method.
-- Authentication middleware continues to resolve the current local user from
-  the forum session; it never contacts an OAuth provider during ordinary forum
-  requests.
+### Creating a post
 
-## OAuth Security Requirements
+Only an authenticated local forum user—whether signed in by password, GitHub,
+or Google—can access the create-post form and submit a post.
 
-- Generate authorization state with at least 32 bytes from `crypto/rand`.
-- Bind state to the initiating browser with a hardened short-lived cookie.
-- Store only a hash of state with its provider, PKCE verifier, and expiry in a
-  concurrency-safe in-memory store.
-- State expires after ten minutes, is provider-specific, is consumed atomically,
-  and cannot be replayed.
-- Compare state in constant time and clear its cookie on every callback outcome.
-- Use PKCE S256 for GitHub and Google authorization-code exchange.
-- Fixed configured redirect URIs must match the registered provider callbacks.
-- Provider HTTP clients use timeouts, response-size limits, status validation,
-  and strict response parsing.
-- Client secrets come only from runtime environment variables.
-- Authorization codes, access/refresh tokens, client secrets, raw state, and
-  PKCE material are never logged.
-- Provider access and refresh tokens are never persisted.
-- Provider failures return safe messages without response bodies or internal
-  implementation details.
+The form continues to require the existing title, body, and category fields. It
+adds an optional image input and visible guidance explaining:
 
-## Configuration
+- the image is optional
+- JPEG, PNG, and GIF are supported
+- the maximum size is 20 MB
 
-Each provider uses three environment variables:
+The file input may use an HTML `accept` attribute, but backend validation is
+always authoritative.
+
+Successful creation redirects with `303 See Other` to `/posts/{id}`. A
+text-only submission behaves as it did before this extension.
+
+### Viewing a post
+
+When a post has an image, its detail page renders that image responsively from a
+public URL. Both authenticated users and guests can request the post page and
+the image bytes. A post without an image renders no broken or empty image
+element.
+
+Showing a smaller image preview in post listings is optional. The post detail
+image is mandatory.
+
+## Architecture
+
+The extension preserves the existing layers:
 
 ```text
-GITHUB_CLIENT_ID
-GITHUB_CLIENT_SECRET
-GITHUB_REDIRECT_URL
+POST /posts
+→ authentication middleware
+→ post-creation handler and bounded multipart parsing
+→ image validator/storage
+→ post validation service
+→ post repository transaction
+→ SQLite image path
+→ 303 /posts/{id}
 
-GOOGLE_CLIENT_ID
-GOOGLE_CLIENT_SECRET
-GOOGLE_REDIRECT_URL
+GET /posts/{id}
+→ post repository detail
+→ server-rendered template
+→ public /static/uploads/{generated-name}
 ```
 
-A provider is disabled when all three values are absent. Supplying only part of
-a provider configuration is a startup error. Only enabled providers appear in
-the UI and expose usable authentication routes.
+Responsibilities are separated as follows:
 
-`.env` files and real credentials are never committed. A committed
-`.env.example`, if present, contains names/placeholders only. Docker receives
-secrets at runtime rather than embedding them in the image or Compose file.
+- the handler owns HTTP parsing, authentication context, safe status/message
+  mapping, multipart cleanup, and compensating deletion after downstream
+  failure
+- the upload package owns exact byte limits, verified image type, UUID naming,
+  atomic filesystem writes, public-path generation, and constrained deletion
+- the validation/service layer owns the existing author, title, body, and
+  category rules and passes through only a trusted internal image path
+- the repository owns parameterized SQL and transactional post/category writes
+- templates render the safe public path using `html/template`
 
-## Routes and HTTP Behavior
+## Storage
 
-New public routes:
+### Filesystem
+
+Uploaded image bytes are stored on disk under:
 
 ```text
-GET /auth/github
-GET /auth/github/callback
-GET /auth/google
-GET /auth/google/callback
+static/uploads/
 ```
 
-The existing `/register`, `/login`, `/logout`, forum content, reaction, and
-filter routes remain unchanged.
-
-OAuth outcomes:
-
-- successful callback: `303 See Other` to `/`;
-- malformed, missing, denied, expired, mismatched, or replayed callback:
-  `400 Bad Request`;
-- existing-email collision: `409 Conflict`;
-- provider timeout or invalid upstream response: `502 Bad Gateway`;
-- unexpected local persistence/session failure: safe `500 Internal Server Error`.
-
-Normal resource reads use GET and state-changing forum forms use POST. OAuth
-start and callback routes are deliberate GET exceptions because redirects are
-part of the authorization protocol; they may create/consume temporary OAuth
-state and establish a forum session.
-
-## Persistence
-
-The completed forum tables remain mandatory. Authentication adds:
+Final public paths have this shape:
 
 ```text
-users.password_hash                         nullable for OAuth-only users
-oauth_accounts(id, user_id, provider,
-               provider_user_id, email,
-               created_at)
+/static/uploads/{uuid}.jpg
+/static/uploads/{uuid}.png
+/static/uploads/{uuid}.gif
 ```
 
-Required OAuth invariants:
+The server generates the UUID and extension. Original filenames never become
+filesystem paths. Files are written through a temporary file on the destination
+filesystem, closed successfully, and atomically renamed to avoid exposing
+partial images. Temporary or partial files are removed after failures.
 
-- unique `(provider, provider_user_id)`;
-- unique `(user_id, provider)`;
-- foreign key from `oauth_accounts.user_id` to `users.id` with cascade delete;
-- normalized non-empty provider data;
-- atomic local-user and OAuth-account creation;
-- no provider tokens stored in SQLite;
-- one active session per local user regardless of authentication method.
+Runtime images are ignored by Git. A placeholder such as
+`static/uploads/.gitkeep` retains the directory in clean checkouts.
 
-Applied migrations are immutable. Schema changes use a new numbered migration
-and preserve existing forum users and content.
+### Docker persistence
+
+Docker Compose mounts persistent storage at `/app/static/uploads`, separately
+from or alongside the existing SQLite data volume. The non-root application
+user must be able to create and remove managed image files there.
+
+Replacing the application container must not remove previously uploaded images.
+The related SQLite post and its image must remain usable together.
+
+### Database
+
+A new numbered migration adds a nullable `posts.image_path` column. Applied
+migrations are immutable, and existing posts must survive the upgrade.
+
+- image bytes are never stored in SQLite
+- image posts store the generated public path
+- text-only posts store SQL `NULL`
+- repository reads map `NULL` to an empty Go string safely
+- post detail and all list/filter read models preserve the image path
+- post creation and category links remain one database transaction
+
+If image saving succeeds but post validation or persistence fails, the handler
+attempts to delete the saved image. Cleanup accepts only paths managed by the
+configured upload storage.
+
+## HTTP Behavior And Errors
+
+Existing route authorization remains unchanged:
+
+```text
+GET  /posts/new                 authenticated
+POST /posts                     authenticated
+GET  /posts/{id}                public
+GET  /static/uploads/{filename} public
+```
+
+Expected outcomes:
+
+- successful post creation: `303 See Other`
+- malformed multipart form: `400 Bad Request`
+- empty, unsupported, malformed, or unreadable image: `400 Bad Request`
+- image larger than 20 MiB: `400 Bad Request` with a clear size message
+- unauthenticated post creation: `401 Unauthorized`
+- unexpected filesystem or database failure: safe `500 Internal Server Error`
+
+Errors must not reveal local filesystem paths, SQL errors, stack traces, or
+other internal implementation details. Failed requests must not leave a post
+row, category links, multipart temporary files, partial upload files, or a saved
+image that should have been rolled back.
+
+URL-encoded text-only submissions should remain supported so existing behavior
+and clients do not regress. The browser create-post form uses
+`multipart/form-data`.
+
+## Security And Safety
+
+- Upload authorization is enforced server-side before storage work begins.
+- Request size is bounded with `http.MaxBytesReader`, with limited multipart
+  overhead above the exact image limit.
+- The image stream is independently limited to `MaxImageSize + 1` bytes.
+- `ParseMultipartForm` memory settings are not treated as security limits.
+- Multipart temporary files are explicitly removed.
+- Client filenames, extensions, MIME declarations, and content lengths are
+  untrusted.
+- Only verified JPEG, PNG, and GIF content receives a final stored filename.
+- Storage deletion cannot escape the configured upload directory.
+- Public image URLs use only server-generated names.
+- User text remains escaped by `html/template` and SQL remains parameterized.
+- No JavaScript is introduced.
+
+Uploaded images are public by design because guests must see them. Public read
+access does not grant upload or filesystem-management permission.
+
+## Baseline Regression Requirements
+
+The completed forum-authentication application remains fully supported:
+
+- email/password registration, login, and logout
+- GitHub and Google OAuth login
+- verified provider identity and existing collision policy
+- OAuth state, PKCE, provider timeout, and secret-handling protections
+- UUID-backed sessions, hardened cookies, and one active session per user
+- public post/category reading
+- authenticated post, comment, and reaction behavior
+- category, created-post, and liked-post filters
+- SQLite migrations, foreign keys, and transactional writes
+- server-rendered HTML/CSS without JavaScript
+
+Image upload must use the current authenticated local user and must not create a
+new authentication or authorization path.
 
 ## Technology Constraints
 
-- Go with `net/http`, `html/template`, and standard-library OAuth HTTP handling
-- SQLite through the exercise-allowed driver
-- bcrypt and UUID packages already allowed by the exercises
-- server-rendered HTML and CSS only; no JavaScript
-- OAuth secrets supplied through the environment
-- Docker-compatible build and runtime
+- Go backend using the standard library for upload and image handling
+- SQLite through the existing exercise-allowed driver
+- existing bcrypt and UUID dependencies
+- server-rendered HTML and CSS
+- Docker-compatible build and persistent runtime storage
+- no additional third-party image/upload dependency
 
-Do not add an OAuth dependency that is absent from the exercise's allowed
-package list. Provider-specific HTTP requests use standard Go packages.
+## Quality And Acceptance
 
-## Quality and Acceptance
+The release is ready only when:
 
-The authentication release is ready only when:
+- valid JPEG, PNG, and GIF uploads create posts successfully
+- unsupported and fake image content is rejected
+- exactly 20 MiB is accepted and 20 MiB plus one byte is rejected
+- unknown-length oversized input is rejected safely
+- text-only post creation and old posts still work
+- guests can reopen an image post and retrieve identical image bytes with the
+  correct content type
+- failed validation, storage, or database operations leave no inappropriate
+  post row or image file
+- Docker container replacement preserves both database content and uploads
+- the create-post page clearly explains supported formats and size
+- all existing authentication and forum regression tests remain green
+- `gofmt`, `go vet ./...`, `go test ./...`, `go test -race ./...`,
+  `go build ./...`, and `docker build .` pass
+- runtime uploads, secrets, databases, logs, caches, and build artifacts are not
+  committed
+- the manual checks in `docs/audit-image-upload.md` have been exercised
+- README instructions work from a clean checkout
 
-- GitHub and Google first/repeat login work with real development credentials;
-- OAuth users can create forum content, log out, and later see persisted content;
-- password registration/login and all forum behavior still pass regression tests;
-- duplicate registration and invalid credential audit cases remain correct;
-- state expiry, mismatch, replay, provider denial, upstream failure, collisions,
-  and transaction rollback are tested;
-- `gofmt`, `go vet ./...`, `go test ./...`, `go test -race ./...`, and
-  `go build ./...` pass;
-- the Docker image builds and accepts provider configuration at runtime;
-- all checks in `docs/audit-authentication.md` have been exercised;
-- no secrets, tokens, database files, or debug artifacts are committed;
-- README setup and callback instructions work from a clean checkout.
+## Out Of Scope
 
-## Out of Scope
-
-- automatic or explicit account linking
-- password creation/reset for OAuth-only users
-- storing provider access/refresh tokens or calling provider APIs after login
-- OAuth providers other than GitHub and Google
-- image upload, moderation, roles, or unrelated forum features
-- JavaScript login SDKs, SPA frameworks, or a public JSON API
-- HTTPS termination, rate limiting, and deployment infrastructure
+- image editing, resizing, cropping, recompression, or thumbnail generation
+- formats other than JPEG, PNG, and GIF
+- multiple images per post
+- image upload on comments or user profiles
+- remote/object/cloud image storage
+- image deletion or replacement UI
+- new OAuth providers, account linking, or password reset
+- moderation, roles, JavaScript, SPA frameworks, or a public JSON API
+- HTTPS termination, rate limiting, quotas, and deployment infrastructure

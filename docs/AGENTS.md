@@ -1,175 +1,173 @@
-# AGENTS.md — Forum Authentication Implementation Guide
+# AGENTS.md — Forum Image Upload Implementation Guide
 
 ## Project
 
-This repository contains a completed Go web forum that is now being extended by
-the forum-authentication exercise.
+This repository contains a completed Go forum-authentication project that is
+now being extended by the forum image-upload exercise.
 
-Preserve the existing email/password flow and all forum behavior. Add exactly
-the mandatory GitHub and Google OAuth methods. Do not add other providers,
-account linking, password reset, image uploads, moderation, roles, or unrelated
-optional features.
+Preserve the existing email/password and GitHub/Google OAuth flows, UUID
+sessions, posts, comments, categories, reactions, filters, public reading,
+SQLite persistence, server-rendered templates, and Docker setup. Add the
+ability for registered users to attach an optional JPEG, PNG, or GIF image to a
+new post. Registered users and guests must be able to view the image later.
 
-The existing bcrypt password handling, UUID sessions, layered architecture,
-SQLite persistence, server-rendered templates, and Docker setup remain the
-baseline. OAuth must converge on the same local users and forum sessions.
+Do not reimplement authentication or add unrelated features such as new OAuth
+providers, account linking, password reset, moderation, roles, JavaScript, or a
+public JSON API.
 
 ## Source of Truth
 
 When documents disagree, follow this order:
 
-1. `docs/exercise-authentication.md` — supplied authentication subject
-2. `docs/audit-authentication.md` — authentication auditor checks
-3. `docs/PRD.md` — clarified behavior and fixed security decisions
+1. `docs/exercise-image-upload.md` — supplied image-upload subject
+2. `docs/audit-image-upload.md` — image-upload auditor checks
+3. `docs/PRD.md` — clarified behavior and fixed safety decisions
 4. `docs/tasks.md` — implementation order and phase acceptance checks
 5. `README.md` — commands verified against the current implementation
-6. Existing tests and code — completed forum baseline and regression behavior
+6. Existing tests and code — completed authentication/forum baseline and
+   regression behavior
 
-Do not silently reinterpret an exercise requirement. Record a genuinely unclear
-product decision in the PRD and tasks before implementing it.
+Do not silently reinterpret an exercise requirement. Record a genuinely
+unclear product decision in the PRD and tasks before implementing it.
 
 ## Mandatory Scope
 
-- retain email/password registration, login, and logout
-- add GitHub OAuth authorization-code login
-- add Google OAuth authorization-code login
-- require stable provider user IDs and verified provider emails
-- find or transactionally create a local forum user after provider authentication
-- reuse the existing UUID session, cookie, middleware, expiry, and one-session rule
-- give OAuth users all normal registered-user forum permissions
-- preserve posts, comments, categories, reactions, filters, and public reading
-- provide safe status codes and provider-independent user-facing errors
-- load provider credentials from environment variables only
-- test provider adapters with fake HTTP servers and audit real provider flows manually
-- keep Docker/runtime configuration free of embedded secrets
+- retain all existing password, OAuth, session, and forum behavior
+- allow only authenticated users to create posts and upload images
+- keep text-only post creation working
+- accept JPEG, PNG, and GIF images
+- reject unsupported, empty, malformed, or unreadable image content
+- accept an image of exactly 20 MiB (20,971,520 bytes)
+- reject an image larger than 20 MiB with a clear user-facing message
+- show a post's image to both authenticated users and guests
+- keep uploaded images available when revisiting a post
+- persist uploaded images across Docker container replacement
+- handle malformed input and internal failures without crashing or leaking
+  internal details
 
 ## Architecture
 
-Keep the existing layered flow and add a provider boundary:
+Keep the existing layered flow and add a focused upload boundary:
 
 ```text
-browser
-→ OAuth start/callback handler
-→ OAuth provider adapter
-→ OAuth login service
-→ user/OAuth-account repositories
-→ existing session service and manager
-→ forum_session cookie
-→ authentication middleware
-→ local forum user
+browser multipart request
+→ authenticated post-creation handler
+→ image validation and storage
+→ existing post validation service
+→ post repository and SQLite
+→ redirect to public post detail
+→ template image URL
+→ public static-file handler
 ```
 
-Provider adapters own authorization URLs, code exchange, provider HTTP calls,
-and response normalization. They do not create local users or sessions.
+The handler owns HTTP authentication checks, bounded request parsing, multipart
+cleanup, upload error mapping, redirects, and compensating file deletion when
+post creation fails.
 
-The OAuth login service owns identity resolution, collision policy, username
-selection, and session orchestration. Repositories own SQL and transactional
-local-user/OAuth-account creation. Handlers own HTTP input, cookies, redirects,
-and safe error mapping.
+The upload package owns byte limits, type detection, image decoding checks,
+safe UUID filenames, filesystem paths, atomic file writes, and deletion of only
+the files it manages. It must not create posts or parse forum fields.
 
-Use focused interfaces only at tested boundaries such as provider HTTP behavior,
-authorization-state storage, repositories, and session/cookie management. Do not
-introduce an interface for every concrete type.
+The post service continues to own author and post-field validation. The
+repository owns SQL and the transaction that creates a post and its category
+links. Templates render only the safe public path produced by upload storage.
 
-## Authentication Rules
+Use focused interfaces at tested boundaries, including the handler's image
+storage dependency. Do not introduce an interface for every concrete type.
 
-- Password accounts continue to use normalized email plus bcrypt verification.
-- Unknown email, wrong password, and password login for an OAuth-only account
-  return the identical `401` response and `Wrong email or password` message.
-- GitHub identity uses its stable numeric user ID and a primary verified email.
-- Google identity uses stable `sub` and requires `email_verified=true`.
-- Never identify a provider account by username or email.
-- Returning OAuth users are selected by `(provider, provider_user_id)`.
-- First OAuth login creates the local user and OAuth account in one transaction.
-- OAuth-only users have `NULL` password hashes; never manufacture a password.
-- If the provider email already belongs to any local account, return a safe
-  `409 Conflict`. Never auto-link identities.
-- Normalize generated usernames to the existing 3–32 character rules and use
-  numeric suffixes for uniqueness.
-- Provider profile changes never create a duplicate local account.
-- Every login method creates/replaces the same server-side forum session.
-- OAuth-authenticated users have exactly the same forum rights as password users.
+## Upload Rules
 
-## OAuth Flow Security
+- An image is optional. An absent multipart file part means no image.
+- A present zero-byte file is invalid rather than a text-only submission.
+- `MaxImageSize` is `20 * 1024 * 1024` bytes.
+- Do not rely on a filename extension, multipart `Content-Type`, or
+  `Content-Length` supplied by the client.
+- Use `http.DetectContentType` on file bytes, then verify that the content is a
+  decodable JPEG, PNG, or GIF with standard-library image decoders.
+- Derive the stored extension from the verified content type.
+- Bound the complete HTTP request with `http.MaxBytesReader`, allowing limited
+  multipart overhead, and independently enforce the exact image limit by
+  reading no more than `MaxImageSize + 1` bytes.
+- `ParseMultipartForm`'s memory argument is not an upload-size limit.
+- Do not require the entire upload to remain in memory.
+- Remove multipart temporary files after parsing.
+- Never use the original filename as a filesystem path.
 
-- Generate at least 32 random state bytes with `crypto/rand`.
-- Bind state to the initiating browser with an `HttpOnly`, `SameSite=Lax`,
-  short-lived cookie using the configured `Secure` setting.
-- Use a concurrency-safe in-memory state store containing only a state hash,
-  provider, PKCE verifier, and ten-minute expiry.
-- Consume state atomically, compare it in constant time, reject replay or provider
-  mismatch, and clear the browser cookie on every callback outcome.
-- Use PKCE S256 for both providers.
-- Use fixed validated redirect URIs from configuration.
-- Give provider HTTP clients timeouts and response-body size limits; validate
-  response status and required JSON fields before use.
-- Never log authorization codes, tokens, secrets, raw state, PKCE values, or
-  provider response bodies.
-- Never store access or refresh tokens. Fetch identity and discard them.
-- Provider failures must not create a local user, OAuth identity, or forum session.
-- Production runs use HTTPS and secure session/state cookies.
+## Storage Rules
 
-## HTTP Rules
-
-- `GET /auth/github` and `GET /auth/google` start provider authorization.
-- Provider callbacks use `GET /auth/{provider}/callback`.
-- OAuth GET routes are protocol-specific exceptions to the forum's ordinary
-  read-only GET rule: they may create/consume temporary state and establish a
-  forum session.
-- Success redirects to `/` with `303 See Other`.
-- Invalid/denied callback input is `400`, email collision is `409`, provider
-  failure is `502`, and unexpected local failure is a safe `500`.
-- Existing forum method/status behavior remains unchanged.
-- All authorization is enforced server-side, never only through UI visibility.
-- User input uses parameterized SQL and is escaped by `html/template`.
-- Do not add JavaScript files, script tags, inline event handlers, or JavaScript URLs.
-
-## Configuration Rules
-
-Provider variables are:
-
-```text
-GITHUB_CLIENT_ID
-GITHUB_CLIENT_SECRET
-GITHUB_REDIRECT_URL
-GOOGLE_CLIENT_ID
-GOOGLE_CLIENT_SECRET
-GOOGLE_REDIRECT_URL
-```
-
-All three absent disables that provider. Partial configuration is a startup
-error. Only enabled providers appear in the login UI. `.env` files remain
-ignored; examples contain placeholders only; Docker receives secrets at runtime.
+- Store image files under `static/uploads/` and only the public path in SQLite.
+- Public paths have the form `/static/uploads/{uuid}.{safe-extension}`.
+- Use server-generated UUID filenames.
+- Write through a temporary file in the destination filesystem and atomically
+  rename it only after copying and validation succeed.
+- Remove partial and temporary files on every failure.
+- Use predictable directory and file permissions, such as `0755` and `0644`.
+- The storage deletion operation must reject paths outside its configured
+  upload directory.
+- If post validation or persistence fails after an image is saved, attempt to
+  delete that image and return the appropriate safe HTTP error.
+- Ignore runtime uploads in Git while retaining `static/uploads/.gitkeep`.
+- Mount `/app/static/uploads` as persistent storage in Docker Compose.
+- Uploaded images are intentionally public, but uploading remains restricted to
+  authenticated users.
 
 ## Database Rules
 
-Keep every existing forum table and add `oauth_accounts`. A new migration makes
-`users.password_hash` nullable without modifying an applied migration.
+Add a new numbered migration rather than editing an applied migration. The
+`posts.image_path` column is nullable so old and text-only posts remain valid.
 
-Enforce:
+- write SQL `NULL` for an empty image path
+- read `NULL` safely with `COALESCE` or `sql.NullString`
+- preserve existing posts during migration
+- include the image path in post detail and every listing/filter query that uses
+  the post read model
+- keep post and category-link creation transactional
+- never store image bytes in SQLite
 
-- unique normalized user email and username;
-- unique `(provider, provider_user_id)`;
-- unique `(user_id, provider)`;
-- cascading OAuth-account foreign key to users;
-- atomic first-time user and OAuth-account creation;
-- one active session per local user;
-- no provider tokens in SQLite.
+Enable SQLite foreign keys on every connection. Use real temporary SQLite
+databases in repository and migration tests.
 
-Enable SQLite foreign keys on every connection. Use real transactions for
-multi-statement writes and real temporary SQLite databases in repository tests.
+## HTTP And UI Rules
+
+- `GET /posts/new` and `POST /posts` remain authenticated routes.
+- `GET /posts/{id}` and `GET /static/uploads/{name}` remain public.
+- Successful creation redirects to `/posts/{id}` with `303 See Other`.
+- Invalid, empty, unsupported, malformed, or oversized uploads return `400 Bad
+  Request` with a useful message.
+- Unauthenticated creation returns `401 Unauthorized`.
+- Unexpected storage or persistence failures return a safe `500 Internal Server
+  Error`.
+- Do not expose filesystem paths, SQL errors, stack traces, or raw internal
+  errors to users.
+- The create-post form states that the image is optional, lists JPEG/PNG/GIF,
+  and states the 20 MB maximum.
+- The HTML `accept` attribute is guidance only; backend validation is mandatory.
+- Continue using parameterized SQL and `html/template` escaping.
+- Do not add JavaScript files, script tags, inline event handlers, or JavaScript
+  URLs.
+
+## Authentication Regression Rules
+
+The completed authentication release is baseline behavior. Preserve password
+registration/login/logout, GitHub and Google OAuth, verified provider identity,
+OAuth collision policy, PKCE/state protections, one active UUID session per
+user, hardened cookies, environment-only provider secrets, and safe provider
+errors. Do not weaken or bypass server-side authorization to implement uploads.
 
 ## Working Rules
 
-- Work in the order in `docs/tasks.md`; a phase is complete only when its tests pass.
-- Use only exercise-allowed packages. Implement provider OAuth requests with the
-  Go standard library rather than adding an unlisted OAuth dependency.
-- Fake only external provider HTTP endpoints in automated tests; do not mock
-  SQLite behavior that the audit examines.
+- Work in the order in `docs/tasks.md`; a phase is complete only when its tests
+  and acceptance checks pass.
+- Use only standard Go packages plus the exercise-allowed SQLite, bcrypt, and
+  UUID dependencies already present in the project.
+- Use valid generated JPEG, PNG, and GIF fixtures in tests; do not test only
+  filename extensions or signature bytes.
+- Use `t.TempDir()` for filesystem tests and real temporary SQLite databases for
+  persistence tests.
 - Run focused tests plus `gofmt`, `go vet ./...`, `go test ./...`,
-  `go test -race ./...`, and `go build ./...` regularly.
-- Keep existing forum tests green throughout the extension.
-- Keep secrets, tokens, `.env` files, runtime databases, logs, and build artifacts
-  out of Git.
-- Do not claim README or Docker commands until verified.
+  `go test -race ./...`, `go build ./...`, and the Docker build.
+- Keep existing authentication and forum tests green throughout the extension.
+- Keep secrets, tokens, `.env` files, runtime databases, uploaded images, logs,
+  temporary files, caches, and build artifacts out of Git.
+- Do not claim README or Docker commands until they have been verified.
 - Keep commits small, coherent, tested, and easy for a learner to review.

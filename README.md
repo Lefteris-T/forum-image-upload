@@ -282,8 +282,8 @@ http://localhost:8080/auth/github/callback
 http://localhost:8080/auth/google/callback
 ```
 
-See [docs/setup-guide.md](docs/setup-guide.md) for provider-console setup,
-architecture, production guidance, and troubleshooting.
+See [docs/PRD.md](docs/PRD.md) for the current extension requirements and
+architecture.
 
 ---
 
