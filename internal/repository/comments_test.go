@@ -43,6 +43,7 @@ func TestCommentRepositoryCreateStoresAuthor(t *testing.T) {
 		"Post title",
 		"Post body",
 		[]int64{1},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("posts.Create(): %v", err)

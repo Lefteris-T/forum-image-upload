@@ -1,9 +1,169 @@
 package database
 
 import (
+	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestPostImageMigrationPreservesExistingPosts(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "forum.db")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+	defer db.Close()
+
+	migrationsDir := t.TempDir()
+
+	for _, name := range []string{
+		"001_auth.sql",
+		"002_forum_content.sql",
+		"003_seed_categories.sql",
+		"004_oauth_accounts.sql",
+	} {
+		content, err := os.ReadFile(filepath.Join("../../migrations", name))
+		if err != nil {
+			t.Fatalf("read migration %s: %v", name, err)
+		}
+
+		if err := os.WriteFile(
+			filepath.Join(migrationsDir, name),
+			content,
+			0o644,
+		); err != nil {
+			t.Fatalf("write migration %s: %v", name, err)
+		}
+	}
+
+	if err := Migrate(db, migrationsDir); err != nil {
+		t.Fatalf("Migrate() before image migration error: %v", err)
+	}
+
+	userResult, err := db.Exec(`
+		INSERT INTO users (email, username, password_hash, created_at)
+		VALUES (?, ?, ?, ?)
+	`,
+		"existing@example.com",
+		"existing-user",
+		"password-hash",
+		"2026-09-03T00:00:00Z",
+	)
+	if err != nil {
+		t.Fatalf("insert existing user: %v", err)
+	}
+
+	userID, err := userResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("existing user LastInsertId(): %v", err)
+	}
+
+	postResult, err := db.Exec(`
+		INSERT INTO posts (author_id, title, body, created_at)
+		VALUES (?, ?, ?, ?)
+	`,
+		userID,
+		"Existing post",
+		"Created before image support",
+		"2026-09-03T00:00:00Z",
+	)
+	if err != nil {
+		t.Fatalf("insert existing post: %v", err)
+	}
+
+	postID, err := postResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("existing post LastInsertId(): %v", err)
+	}
+
+	imageMigration, err := os.ReadFile(
+		filepath.Join("../../migrations", "005_post_images.sql"),
+	)
+	if err != nil {
+		t.Fatalf("read image migration: %v", err)
+	}
+
+	if err := os.WriteFile(
+		filepath.Join(migrationsDir, "005_post_images.sql"),
+		imageMigration,
+		0o644,
+	); err != nil {
+		t.Fatalf("write image migration: %v", err)
+	}
+
+	if err := Migrate(db, migrationsDir); err != nil {
+		t.Fatalf("Migrate() image migration error: %v", err)
+	}
+
+	rows, err := db.Query("PRAGMA table_info(posts)")
+	if err != nil {
+		t.Fatalf("query posts columns: %v", err)
+	}
+	defer rows.Close()
+
+	foundImagePath := false
+
+	for rows.Next() {
+		var columnID int
+		var name string
+		var columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var primaryKey int
+
+		if err := rows.Scan(
+			&columnID,
+			&name,
+			&columnType,
+			&notNull,
+			&defaultValue,
+			&primaryKey,
+		); err != nil {
+			t.Fatalf("scan posts column: %v", err)
+		}
+
+		if name == "image_path" {
+			foundImagePath = true
+
+			if columnType != "TEXT" {
+				t.Fatalf("image_path type = %q, want TEXT", columnType)
+			}
+
+			if notNull != 0 {
+				t.Fatal("image_path is NOT NULL, want nullable")
+			}
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		t.Fatalf("posts columns rows error: %v", err)
+	}
+
+	if !foundImagePath {
+		t.Fatal("posts.image_path column was not created")
+	}
+
+	var title string
+	var imagePath sql.NullString
+
+	if err := db.QueryRow(`
+		SELECT title, image_path
+		FROM posts
+		WHERE id = ?
+	`, postID).Scan(&title, &imagePath); err != nil {
+		t.Fatalf("query existing post after migration: %v", err)
+	}
+
+	if title != "Existing post" {
+		t.Fatalf("title = %q, want Existing post", title)
+	}
+
+	if imagePath.Valid {
+		t.Fatalf("image_path = %q, want NULL", imagePath.String)
+	}
+}
 
 func TestContentMigrationCreatesForumTables(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "forum.db")

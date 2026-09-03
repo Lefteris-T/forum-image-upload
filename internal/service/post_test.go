@@ -13,6 +13,7 @@ type fakePostCreator struct {
 	title       string
 	body        string
 	categoryIDs []int64
+	imagePath   string
 
 	postID int64
 	err    error
@@ -23,12 +24,14 @@ func (f *fakePostCreator) Create(
 	title string,
 	body string,
 	categoryIDs []int64,
+	imagePath string,
 ) (int64, error) {
 	f.called = true
 	f.authorID = authorID
 	f.title = title
 	f.body = body
 	f.categoryIDs = categoryIDs
+	f.imagePath = imagePath
 
 	return f.postID, f.err
 }

@@ -56,6 +56,7 @@ func TestPostReactionRepositoryInsertAndToggleOff(t *testing.T) {
 		"Post",
 		"Body",
 		[]int64{1},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("posts.Create(): %v", err)
@@ -173,6 +174,7 @@ func TestPostReactionRepositorySwitchesReaction(t *testing.T) {
 		"Post",
 		"Body",
 		[]int64{1},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("posts.Create(): %v", err)
@@ -298,6 +300,7 @@ func TestCommentReactionRepositoryTransitions(t *testing.T) {
 		"Post",
 		"Body",
 		[]int64{1},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("posts.Create(): %v", err)
@@ -521,6 +524,7 @@ func TestPostReactionRepositoryKeepsOneReactionPerUser(t *testing.T) {
 		"Post",
 		"Body",
 		[]int64{1},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("posts.Create(): %v", err)
@@ -613,6 +617,7 @@ func TestPostReactionCountsFollowTransitions(t *testing.T) {
 		"Post",
 		"Body",
 		[]int64{1},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("posts.Create(): %v", err)
@@ -730,6 +735,7 @@ func TestCommentReactionCountsFollowTransitions(t *testing.T) {
 		"Post",
 		"Body",
 		[]int64{1},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("posts.Create(): %v", err)

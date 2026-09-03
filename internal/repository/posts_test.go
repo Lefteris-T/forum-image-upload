@@ -37,6 +37,7 @@ func TestPostRepositoryReadsOAuthOnlyAuthors(t *testing.T) {
 		"OAuth post",
 		"Created without a password hash",
 		[]int64{1},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("posts.Create(): %v", err)
@@ -100,6 +101,156 @@ func TestPostRepositoryReadsOAuthOnlyAuthors(t *testing.T) {
 	}
 }
 
+func TestPostRepositoryImagePathRoundTripsAcrossReads(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "forum.db"))
+	if err != nil {
+		t.Fatalf("database.Open(): %v", err)
+	}
+	defer db.Close()
+
+	if err := database.Migrate(
+		db,
+		filepath.Join("..", "..", "migrations"),
+	); err != nil {
+		t.Fatalf("database.Migrate(): %v", err)
+	}
+
+	users := NewUserRepository(db)
+
+	userID, err := users.Create(
+		"image-author@example.com",
+		"image-author",
+		"password-hash",
+	)
+	if err != nil {
+		t.Fatalf("users.Create(): %v", err)
+	}
+
+	posts := NewPostRepository(db)
+
+	textPostID, err := posts.Create(
+		userID,
+		"Text-only post",
+		"No image",
+		[]int64{4},
+		"",
+	)
+	if err != nil {
+		t.Fatalf("create text-only post: %v", err)
+	}
+
+	const imagePath = "/static/uploads/test-image.png"
+
+	imagePostID, err := posts.Create(
+		userID,
+		"Image post",
+		"Has an image",
+		[]int64{1},
+		imagePath,
+	)
+	if err != nil {
+		t.Fatalf("create image post: %v", err)
+	}
+
+	var textPath any
+	if err := db.QueryRow(`
+		SELECT image_path
+		FROM posts
+		WHERE id = ?
+	`, textPostID).Scan(&textPath); err != nil {
+		t.Fatalf("query text-only image_path: %v", err)
+	}
+
+	if textPath != nil {
+		t.Fatalf("text-only image_path = %#v, want NULL", textPath)
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO post_reactions (user_id, post_id, value)
+		VALUES (?, ?, 1)
+	`, userID, imagePostID); err != nil {
+		t.Fatalf("like image post: %v", err)
+	}
+
+	textDetail, err := posts.Detail(textPostID)
+	if err != nil {
+		t.Fatalf("text-only Detail(): %v", err)
+	}
+	if textDetail.ImagePath != "" {
+		t.Fatalf("text-only detail ImagePath = %q, want empty", textDetail.ImagePath)
+	}
+
+	imageDetail, err := posts.Detail(imagePostID)
+	if err != nil {
+		t.Fatalf("image Detail(): %v", err)
+	}
+	if imageDetail.ImagePath != imagePath {
+		t.Fatalf(
+			"image detail ImagePath = %q, want %q",
+			imageDetail.ImagePath,
+			imagePath,
+		)
+	}
+
+	listChecks := []struct {
+		name      string
+		read      func() ([]PostListItem, error)
+		wantCount int
+	}{
+		{name: "all posts", read: posts.List, wantCount: 2},
+		{name: "category", read: func() ([]PostListItem, error) {
+			return posts.ListByCategory(1)
+		}, wantCount: 1},
+		{name: "author", read: func() ([]PostListItem, error) {
+			return posts.ListByAuthor(userID)
+		}, wantCount: 2},
+		{name: "liked", read: func() ([]PostListItem, error) {
+			return posts.ListLikedByUser(userID)
+		}, wantCount: 1},
+	}
+
+	for _, check := range listChecks {
+		t.Run(check.name, func(t *testing.T) {
+			got, err := check.read()
+			if err != nil {
+				t.Fatalf("read posts: %v", err)
+			}
+
+			if len(got) != check.wantCount {
+				t.Fatalf("post count = %d, want %d", len(got), check.wantCount)
+			}
+
+			foundImagePost := false
+
+			for _, post := range got {
+				switch post.ID {
+				case imagePostID:
+					foundImagePost = true
+					if post.ImagePath != imagePath {
+						t.Fatalf(
+							"image post ImagePath = %q, want %q",
+							post.ImagePath,
+							imagePath,
+						)
+					}
+
+				case textPostID:
+					if post.ImagePath != "" {
+						t.Fatalf(
+							"text post ImagePath = %q, want empty",
+							post.ImagePath,
+						)
+					}
+				}
+			}
+
+			if !foundImagePost {
+				t.Fatal("image post was not returned")
+			}
+		})
+	}
+}
+
 func TestPostRepositoryCreateWithOneCategory(t *testing.T) {
 	dbPath := filepath.Join(
 		t.TempDir(),
@@ -138,6 +289,7 @@ func TestPostRepositoryCreateWithOneCategory(t *testing.T) {
 		"My first post",
 		"This is the body",
 		[]int64{1},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("posts.Create(): %v", err)
@@ -234,6 +386,7 @@ func TestPostRepositoryCreateWithSeveralCategories(t *testing.T) {
 		"Post with categories",
 		"Body",
 		[]int64{1, 2, 3},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("posts.Create(): %v", err)
@@ -325,6 +478,7 @@ func TestPostRepositoryCreateRollsBackOnUnknownCategory(t *testing.T) {
 		"Should rollback",
 		"This post must not remain",
 		[]int64{1, 999},
+		"",
 	)
 	if err == nil {
 		t.Fatal("posts.Create() error = nil, want error")
@@ -589,6 +743,7 @@ func TestPostRepositoryListReturnsFullPostDataWithoutDuplicates(t *testing.T) {
 		"Go and DevOps",
 		"Testing full post data",
 		[]int64{2, 4},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("posts.Create(): %v", err)
@@ -747,6 +902,7 @@ func TestPostRepositoryDetailReturnsPostWithOrderedComments(t *testing.T) {
 		"Post title",
 		"Post body",
 		[]int64{1, 2},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("posts.Create(): %v", err)
@@ -1018,6 +1174,7 @@ func TestPostRepositoryListByCategoryReturnsExactPosts(t *testing.T) {
 		"Go post",
 		"Body",
 		[]int64{2},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("create Go post: %v", err)
@@ -1028,6 +1185,7 @@ func TestPostRepositoryListByCategoryReturnsExactPosts(t *testing.T) {
 		"DevOps post",
 		"Body",
 		[]int64{4},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("create DevOps post: %v", err)
@@ -1038,6 +1196,7 @@ func TestPostRepositoryListByCategoryReturnsExactPosts(t *testing.T) {
 		"Go and DevOps",
 		"Body",
 		[]int64{2, 4},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("create multi-category post: %v", err)
@@ -1147,6 +1306,7 @@ func TestPostRepositoryListByAuthorReturnsOnlyOwnPosts(t *testing.T) {
 		"My post",
 		"Body",
 		[]int64{1, 2},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("create own post: %v", err)
@@ -1157,6 +1317,7 @@ func TestPostRepositoryListByAuthorReturnsOnlyOwnPosts(t *testing.T) {
 		"Other post",
 		"Body",
 		[]int64{4},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("create other post: %v", err)
@@ -1253,6 +1414,7 @@ func TestPostRepositoryListLikedByUserReturnsOnlyActiveLikes(t *testing.T) {
 		"Liked post",
 		"Body",
 		[]int64{1, 2},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("create liked post: %v", err)
@@ -1263,6 +1425,7 @@ func TestPostRepositoryListLikedByUserReturnsOnlyActiveLikes(t *testing.T) {
 		"Disliked post",
 		"Body",
 		[]int64{4},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("create disliked post: %v", err)
@@ -1273,6 +1436,7 @@ func TestPostRepositoryListLikedByUserReturnsOnlyActiveLikes(t *testing.T) {
 		"Other user's liked post",
 		"Body",
 		[]int64{2},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("create other user liked post: %v", err)
@@ -1389,6 +1553,7 @@ func TestPostRepositoryListLikedByUserExcludesRemovedLike(t *testing.T) {
 		"Temporarily liked",
 		"Body",
 		[]int64{1},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("create post: %v", err)
