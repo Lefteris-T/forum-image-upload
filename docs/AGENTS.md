@@ -107,7 +107,8 @@ storage dependency. Do not introduce an interface for every concrete type.
 - If post validation or persistence fails after an image is saved, attempt to
   delete that image and return the appropriate safe HTTP error.
 - Ignore runtime uploads in Git while retaining `static/uploads/.gitkeep`.
-- Mount `/app/static/uploads` as persistent storage in Docker Compose.
+- Mount the `forum-uploads` named volume at `/app/static/uploads` in Docker
+  Compose, alongside the `forum-data` SQLite volume.
 - Uploaded images are intentionally public, but uploading remains restricted to
   authenticated users.
 

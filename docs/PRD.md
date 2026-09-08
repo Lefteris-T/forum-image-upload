@@ -139,14 +139,15 @@ filesystem paths. Files are written through a temporary file on the destination
 filesystem, closed successfully, and atomically renamed to avoid exposing
 partial images. Temporary or partial files are removed after failures.
 
-Runtime images are ignored by Git. A placeholder such as
-`static/uploads/.gitkeep` retains the directory in clean checkouts.
+Runtime images are ignored by Git. The tracked
+`static/uploads/.gitkeep` placeholder retains the directory in clean
+checkouts.
 
 ### Docker persistence
 
-Docker Compose mounts persistent storage at `/app/static/uploads`, separately
-from or alongside the existing SQLite data volume. The non-root application
-user must be able to create and remove managed image files there.
+Docker Compose mounts the `forum-uploads` named volume at
+`/app/static/uploads`, alongside the existing `forum-data` SQLite volume. The
+non-root application user can create and remove managed image files there.
 
 Replacing the application container must not remove previously uploaded images.
 The related SQLite post and its image must remain usable together.

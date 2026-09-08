@@ -14,7 +14,9 @@ The project uses a layered architecture and test-driven development, with emphas
 - UUID-based sessions
 - One active session per user
 - Public post listing and post detail pages
-- Authenticated post creation
+- Authenticated post creation with an optional JPEG, PNG, or GIF image
+- Public post-image viewing for authenticated users and guests
+- Content-based image validation with an exact 20 MiB limit
 - Categories and category filtering
 - Comments
 - Like / dislike reactions
@@ -28,7 +30,7 @@ The project uses a layered architecture and test-driven development, with emphas
 - SQLite persistence
 - Responsive HTML/CSS interface
 - Docker and Docker Compose support
-- Persistent Docker volume for SQLite data
+- Persistent Docker volumes for SQLite data and uploaded images
 - Helper scripts for build, run, and stop
 
 No JavaScript is required by the application.
@@ -68,6 +70,12 @@ OAuth browser flow
    v
 OAuth start/callback -> GitHub or Google -> OAuth login service
    -> local user + OAuth account -> existing forum session
+
+Image upload flow
+   |
+   v
+Bounded multipart request -> verified JPEG/PNG/GIF -> UUID file on disk
+   -> public image path in SQLite -> server-rendered post detail
 ```
 
 Project structure:
@@ -86,6 +94,7 @@ forum/
 │   ├── repository/
 │   ├── service/
 │   ├── session/
+│   ├── upload/
 │   ├── validation/
 │   └── web/
 │       ├── handler/
@@ -94,6 +103,7 @@ forum/
 ├── migrations/
 ├── templates/
 ├── static/
+│   └── uploads/
 ├── scripts/
 ├── docs/
 ├── data/
@@ -136,6 +146,7 @@ Important rules:
 - one reaction per user per target
 - unique post/category relations
 - transactional multi-row writes
+- nullable post image paths; image bytes remain on disk
 
 Migrations live in:
 
@@ -152,6 +163,41 @@ data/forum.db
 ```
 
 Runtime database files are ignored by Git.
+
+---
+
+## Post Images
+
+Authenticated users may attach one optional image when creating a post.
+Text-only post creation continues to work.
+
+Supported formats:
+
+```text
+JPEG
+PNG
+GIF
+```
+
+The exact maximum image size is 20 MiB (`20,971,520` bytes), displayed in the
+form as 20 MB. The server checks the actual bytes rather than trusting the
+browser filename, declared content type, or `Content-Length`. Empty,
+unsupported, malformed, unreadable, and oversized images are rejected without
+creating a post.
+
+Validated images are written atomically under:
+
+```text
+static/uploads/{uuid}.jpg
+static/uploads/{uuid}.png
+static/uploads/{uuid}.gif
+```
+
+SQLite stores only the public path, such as
+`/static/uploads/{uuid}.png`. Runtime uploads are ignored by Git and excluded
+from Docker build contexts, while `static/uploads/.gitkeep` retains the
+directory in clean checkouts. Uploading requires authentication, but post
+images are intentionally public so guests can read image posts.
 
 ---
 
@@ -217,6 +263,9 @@ POST /comments/{id}/react
 502  OAuth provider failure
 500  unexpected internal error
 ```
+
+Invalid image content and images larger than 20 MiB return `400 Bad Request`
+with a safe user-facing message.
 
 Successful state-changing form submissions use `303 See Other`.
 
@@ -316,6 +365,8 @@ http://localhost:8080
 ```
 
 The application creates the local SQLite data directory when needed.
+Local uploaded images are created under `static/uploads/` and are ignored by
+Git.
 
 ---
 
@@ -333,10 +384,10 @@ Run with the race detector:
 go test -race ./...
 ```
 
-Format:
+Format tracked Go files:
 
 ```bash
-gofmt -w .
+gofmt -w $(git ls-files '*.go')
 ```
 
 Static analysis:
@@ -351,7 +402,11 @@ Build:
 go build ./...
 ```
 
-The test suite covers configuration, server lifecycle, migrations, repositories, validation, authentication, sessions, posts, comments, reactions, filters, routing, middleware, template rendering, HTTP integration flows, and real SQLite persistence.
+The test suite covers configuration, server lifecycle, migrations,
+repositories, validation, authentication, sessions, posts, optional image
+uploads, exact size boundaries, cleanup behavior, comments, reactions,
+filters, routing, middleware, template rendering, HTTP integration flows, and
+real SQLite persistence.
 
 HTTP integration tests use `httptest.Server` with a real temporary SQLite database.
 
@@ -373,19 +428,22 @@ docker run --rm \
   --env-file .env \
   -p 8080:8080 \
   -v forum-data:/app/data \
+  -v forum-uploads:/app/static/uploads \
   forum
 ```
 
 Omit `--env-file .env` when running the container without OAuth or other
 environment overrides.
 
-The named volume:
+The named volumes:
 
 ```text
 forum-data
+forum-uploads
 ```
 
-stores the SQLite database outside the container so users, posts, comments, and reactions survive container recreation.
+store the SQLite database and uploaded images outside the container so users,
+posts, comments, reactions, and post images survive container recreation.
 
 ---
 
@@ -409,7 +467,8 @@ Stop:
 docker compose down
 ```
 
-The Compose configuration uses the same persistent `forum-data` volume.
+The Compose configuration uses `forum-data` for SQLite and `forum-uploads` for
+`/app/static/uploads`.
 
 Avoid:
 
@@ -417,7 +476,8 @@ Avoid:
 docker compose down -v
 ```
 
-unless you intentionally want to delete the persistent database volume.
+unless you intentionally want to delete both the persistent database and
+uploaded-image volumes.
 
 ---
 
@@ -486,8 +546,11 @@ Implemented security-related decisions include:
 - centralized method enforcement
 - safe internal error responses
 - automatic HTML escaping through `html/template`
+- bounded multipart requests and an independently enforced image-byte limit
+- content detection plus JPEG/PNG/GIF decoding before image publication
+- server-generated UUID image filenames and constrained cleanup paths
 - no JavaScript dependency
-- runtime databases and environment files excluded from Git
+- runtime databases, uploaded images, and environment files excluded from Git
 
 OAuth client secrets belong only in environment variables or a deployment
 secret manager. Never place real credentials in `.env.example`, Compose,
@@ -513,6 +576,7 @@ It includes:
 - category badges
 - login and registration forms
 - post creation form
+- optional responsive post images
 - comment cards
 - like / dislike controls
 - developer-themed background artwork
@@ -538,6 +602,7 @@ Inside SQLite:
 .tables
 SELECT * FROM users;
 SELECT * FROM posts;
+SELECT id, title, image_path FROM posts;
 SELECT * FROM comments;
 ```
 
@@ -566,7 +631,7 @@ write test
 ## Final Verification
 
 ```bash
-gofmt -w .
+gofmt -w $(git ls-files '*.go')
 go vet ./...
 go test ./...
 go test -race ./...
@@ -581,13 +646,17 @@ Also verify manually that:
 - session replacement behaves correctly
 - guests cannot access protected actions
 - posts and comments persist
+- authenticated users can create text-only and image posts
+- JPEG, PNG, and GIF uploads work and remain visible to guests
+- unsupported and larger-than-20-MiB images are rejected
+- uploaded images survive Compose container replacement
 - reactions toggle and switch correctly
 - category, created, and liked filters work
 - unknown routes return `404`
 - invalid methods return `405`
 - SQLite data survives container recreation
 - no JavaScript exists in the repository
-- no database, secret, log, or build artifact is committed
+- no database, uploaded image, secret, log, or build artifact is committed
 
 ---
 
@@ -604,6 +673,7 @@ The goal is not only to build a working forum, but to practice the structure and
 - middleware
 - routing
 - server-side rendering
+- bounded image validation and filesystem storage
 - testing
 - containerization
 - application configuration
