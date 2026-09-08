@@ -21,8 +21,11 @@ services:
 
     volumes:
       - forum-data:/app/data
+      - forum-uploads:/app/static/uploads
 
     restart: unless-stopped
 volumes:
   forum-data:
     name: forum-data
+  forum-uploads:
+    name: forum-uploads

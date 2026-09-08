@@ -14,6 +14,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -58,6 +59,7 @@ type integrationEnv struct {
 	Server          *httptest.Server
 	DB              *sql.DB
 	OAuthStateStore *oauth.OAuthStateStore
+	UploadDir       string
 }
 
 type integrationOAuthProviders struct {
@@ -189,8 +191,9 @@ func newIntegrationEnvWithOAuth(
 	}
 
 	staticDir := t.TempDir()
+	uploadDir := filepath.Join(staticDir, "uploads")
 	imageStorage, err := upload.NewStorage(
-		filepath.Join(staticDir, "uploads"),
+		uploadDir,
 	)
 	if err != nil {
 		t.Fatalf("upload.NewStorage(): %v", err)
@@ -359,6 +362,7 @@ func newIntegrationEnvWithOAuth(
 		Server:          httptest.NewServer(appHandler),
 		DB:              db,
 		OAuthStateStore: oauthStateStore,
+		UploadDir:       uploadDir,
 	}
 }
 func newIntegrationServer(t *testing.T) *httptest.Server {
@@ -527,7 +531,8 @@ func registerAndLogin(
 	res.Body.Close()
 }
 func TestIntegrationUserCreatesPostGuestCanReadIt(t *testing.T) {
-	server := newIntegrationServer(t)
+	env := newIntegrationEnv(t)
+	server := env.Server
 	defer server.Close()
 
 	userBrowser := newIntegrationBrowser(t)
@@ -615,6 +620,21 @@ func TestIntegrationUserCreatesPostGuestCanReadIt(t *testing.T) {
 		"Learning integration testing.",
 	) {
 		t.Fatal("guest cannot see created post body")
+	}
+
+	if strings.Contains(body, `class="post-image"`) {
+		t.Fatal("text-only post rendered image markup")
+	}
+
+	var imagePath sql.NullString
+	if err := env.DB.QueryRow(
+		`SELECT image_path FROM posts WHERE title = ?`,
+		"My Go post",
+	).Scan(&imagePath); err != nil {
+		t.Fatalf("query text-only image path: %v", err)
+	}
+	if imagePath.Valid {
+		t.Fatalf("text-only image_path = %q, want SQL NULL", imagePath.String)
 	}
 }
 
@@ -731,6 +751,131 @@ func TestIntegrationUserUploadsImageGuestCanViewIt(t *testing.T) {
 	if !bytes.Equal(servedBytes, imageBytes) {
 		t.Fatal("guest received image bytes different from the upload")
 	}
+}
+
+func TestIntegrationRejectedUploadCreatesNoPostOrImage(t *testing.T) {
+	validPNG := mustIntegrationPNG(t)
+	oversizedPNG := append([]byte{}, validPNG...)
+	oversizedPNG = append(
+		oversizedPNG,
+		bytes.Repeat([]byte{0}, upload.MaxImageSize+1-len(oversizedPNG))...,
+	)
+
+	tests := []struct {
+		name      string
+		imageData []byte
+		wantBody  string
+	}{
+		{
+			name:      "unsupported content",
+			imageData: []byte("plain text is not an image"),
+			wantBody:  "Only JPEG, PNG, and GIF images are supported.",
+		},
+		{
+			name:      "oversized image",
+			imageData: oversizedPNG,
+			wantBody:  "Image is too big. Maximum size is 20 MB.",
+		},
+	}
+
+	for index, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newIntegrationEnv(t)
+			defer env.Server.Close()
+
+			browser := newIntegrationBrowser(t)
+			registerAndLogin(
+				t,
+				env.Server,
+				browser,
+				fmt.Sprintf("rejected-%d@example.com", index),
+				fmt.Sprintf("rejected-%d", index),
+			)
+
+			title := fmt.Sprintf("Rejected image post %d", index)
+			req := newIntegrationImagePostRequest(
+				t,
+				env.Server.URL,
+				title,
+				tt.imageData,
+			)
+			res, err := browser.Do(req)
+			if err != nil {
+				t.Fatalf("POST /posts: %v", err)
+			}
+			responseBody, err := io.ReadAll(res.Body)
+			res.Body.Close()
+			if err != nil {
+				t.Fatalf("read rejected-upload response: %v", err)
+			}
+
+			if res.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusBadRequest)
+			}
+			if !strings.Contains(string(responseBody), tt.wantBody) {
+				t.Fatalf("response body = %q, want text %q", responseBody, tt.wantBody)
+			}
+
+			var postCount int
+			if err := env.DB.QueryRow(
+				`SELECT COUNT(*) FROM posts WHERE title = ?`,
+				title,
+			).Scan(&postCount); err != nil {
+				t.Fatalf("count rejected posts: %v", err)
+			}
+			if postCount != 0 {
+				t.Fatalf("rejected post count = %d, want 0", postCount)
+			}
+
+			entries, err := os.ReadDir(env.UploadDir)
+			if err != nil {
+				t.Fatalf("read upload directory: %v", err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("upload directory contains %d files after rejection", len(entries))
+			}
+		})
+	}
+}
+
+func newIntegrationImagePostRequest(
+	t *testing.T,
+	serverURL string,
+	title string,
+	imageBytes []byte,
+) *http.Request {
+	t.Helper()
+
+	var requestBody bytes.Buffer
+	writer := multipart.NewWriter(&requestBody)
+	for name, value := range map[string]string{
+		"title":    title,
+		"body":     "Integration image upload body",
+		"category": "2",
+	} {
+		if err := writer.WriteField(name, value); err != nil {
+			t.Fatalf("WriteField(%q): %v", name, err)
+		}
+	}
+
+	imagePart, err := writer.CreateFormFile("image", "browser-name.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile(): %v", err)
+	}
+	if _, err := imagePart.Write(imageBytes); err != nil {
+		t.Fatalf("write multipart image: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, serverURL+"/posts", &requestBody)
+	if err != nil {
+		t.Fatalf("create image-post request: %v", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	return req
 }
 
 func mustIntegrationPNG(t *testing.T) []byte {
