@@ -84,6 +84,31 @@ func TestPostServiceInvalidInputStopsBeforeRepository(t *testing.T) {
 	}
 }
 
+func TestPostServiceCreatesTextOnlyPost(t *testing.T) {
+	repo := &fakePostCreator{postID: 100}
+	service := NewPostService(repo)
+
+	input := validation.PostInput{
+		Title:       "Text-only post",
+		Body:        "This post has no image.",
+		CategoryIDs: []int64{1},
+	}
+
+	postID, err := service.Create(42, input)
+	if err != nil {
+		t.Fatalf("Create() error = %v, want nil", err)
+	}
+	if postID != 100 {
+		t.Fatalf("postID = %d, want 100", postID)
+	}
+	if !repo.called {
+		t.Fatal("repository Create() was not called")
+	}
+	if repo.imagePath != "" {
+		t.Fatalf("imagePath = %q, want empty", repo.imagePath)
+	}
+}
+
 func TestPostServiceUsesAuthenticatedUserAsAuthor(t *testing.T) {
 	repo := &fakePostCreator{
 		postID: 100,
@@ -95,6 +120,7 @@ func TestPostServiceUsesAuthenticatedUserAsAuthor(t *testing.T) {
 		Title:       "  My post  ",
 		Body:        "  My body  ",
 		CategoryIDs: []int64{1, 2},
+		ImagePath:   "/static/uploads/550e8400-e29b-41d4-a716-446655440000.png",
 	}
 
 	postID, err := service.Create(42, input)
@@ -133,6 +159,14 @@ func TestPostServiceUsesAuthenticatedUserAsAuthor(t *testing.T) {
 			"body = %q, want %q",
 			repo.body,
 			"My body",
+		)
+	}
+
+	if repo.imagePath != input.ImagePath {
+		t.Fatalf(
+			"imagePath = %q, want %q",
+			repo.imagePath,
+			input.ImagePath,
 		)
 	}
 }

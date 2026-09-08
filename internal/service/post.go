@@ -51,6 +51,6 @@ func (s *PostService) Create(
 		validated.Title,
 		validated.Body,
 		validated.CategoryIDs,
-		"",
+		validated.ImagePath,
 	)
 }

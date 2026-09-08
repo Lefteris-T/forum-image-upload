@@ -10,6 +10,7 @@ func TestValidatePostAcceptsValidInput(t *testing.T) {
 		Title:       "  My first post  ",
 		Body:        "  This is the body.  ",
 		CategoryIDs: []int64{1, 2},
+		ImagePath:   "/static/uploads/550e8400-e29b-41d4-a716-446655440000.png",
 	}
 
 	got, err := ValidatePost(input)
@@ -38,6 +39,10 @@ func TestValidatePostAcceptsValidInput(t *testing.T) {
 			"len(CategoryIDs) = %d, want 2",
 			len(got.CategoryIDs),
 		)
+	}
+
+	if got.ImagePath != input.ImagePath {
+		t.Fatalf("ImagePath = %q, want %q", got.ImagePath, input.ImagePath)
 	}
 }
 
