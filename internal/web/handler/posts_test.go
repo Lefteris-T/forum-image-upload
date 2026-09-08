@@ -459,6 +459,67 @@ func TestPostDetailHandlerReturnsPost(t *testing.T) {
 		t.Fatal("post author was not rendered")
 	}
 }
+
+func TestPostDetailHandlerRendersImageOnlyWhenPresent(t *testing.T) {
+	renderer, err := view.NewRenderer(
+		filepath.Join("..", "..", "..", "templates"),
+	)
+	if err != nil {
+		t.Fatalf("NewRenderer(): %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		imagePath string
+		wantImage bool
+	}{
+		{
+			name:      "image post",
+			imagePath: "/static/uploads/550e8400-e29b-41d4-a716-446655440000.png",
+			wantImage: true,
+		},
+		{
+			name:      "text-only post",
+			imagePath: "",
+			wantImage: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			posts := &fakePostReader{
+				detail: repository.PostDetail{
+					ID:        42,
+					Title:     "Post title",
+					Body:      "Post body",
+					ImagePath: tt.imagePath,
+					Author: model.User{
+						ID:       1,
+						Username: "lefteris",
+					},
+				},
+			}
+			h := NewPostDetailHandler(posts, renderer)
+
+			req := httptest.NewRequest(http.MethodGet, "/posts/42", nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+			}
+
+			body := rec.Body.String()
+			hasImage := strings.Contains(body, `class="post-image"`)
+			if hasImage != tt.wantImage {
+				t.Fatalf("image markup present = %t, want %t", hasImage, tt.wantImage)
+			}
+			if tt.wantImage && !strings.Contains(body, `src="`+tt.imagePath+`"`) {
+				t.Fatalf("post image path %q was not rendered", tt.imagePath)
+			}
+		})
+	}
+}
 func TestPostDetailHandlerRejectsMalformedID(t *testing.T) {
 	posts := &fakePostReader{}
 

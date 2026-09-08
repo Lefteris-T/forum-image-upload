@@ -504,6 +504,21 @@ fieldset input[type="checkbox"] {
     line-height: 1.15;
 }
 
+.post-image {
+    display: block;
+
+    width: auto;
+    max-width: 100%;
+    height: auto;
+    max-height: 48rem;
+
+    margin-block: 1.5rem;
+
+    border-radius: 12px;
+
+    object-fit: contain;
+}
+
 .comments-section {
     margin-top: 1.5rem;
 }

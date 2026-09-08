@@ -46,3 +46,40 @@ func TestNewPostTemplateExplainsImageUpload(t *testing.T) {
 		}
 	}
 }
+
+func TestPostTemplateRendersResponsiveOptionalImage(t *testing.T) {
+	postTemplatePath := filepath.Join("..", "..", "..", "templates", "post.html")
+	postTemplateBytes, err := os.ReadFile(postTemplatePath)
+	if err != nil {
+		t.Fatalf("read post template: %v", err)
+	}
+
+	postTemplate := string(postTemplateBytes)
+	for _, required := range []string{
+		`{{if .Post.ImagePath}}`,
+		`class="post-image"`,
+		`src="{{.Post.ImagePath}}"`,
+		`alt="Post image"`,
+	} {
+		if !strings.Contains(postTemplate, required) {
+			t.Fatalf("post template does not contain %q", required)
+		}
+	}
+
+	stylePath := filepath.Join("..", "..", "..", "static", "style.css")
+	styleBytes, err := os.ReadFile(stylePath)
+	if err != nil {
+		t.Fatalf("read stylesheet: %v", err)
+	}
+
+	style := string(styleBytes)
+	for _, required := range []string{
+		".post-image",
+		"max-width: 100%",
+		"height: auto",
+	} {
+		if !strings.Contains(style, required) {
+			t.Fatalf("stylesheet does not contain %q", required)
+		}
+	}
+}

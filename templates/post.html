@@ -63,6 +63,16 @@
 
         </header>
 
+        {{if .Post.ImagePath}}
+
+            <img
+                class="post-image"
+                src="{{.Post.ImagePath}}"
+                alt="Post image"
+            >
+
+        {{end}}
+
         <p class="post-body">
             {{.Post.Body}}
         </p>

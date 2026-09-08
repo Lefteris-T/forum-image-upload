@@ -1,10 +1,15 @@
 package web
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -611,6 +616,138 @@ func TestIntegrationUserCreatesPostGuestCanReadIt(t *testing.T) {
 	) {
 		t.Fatal("guest cannot see created post body")
 	}
+}
+
+func TestIntegrationUserUploadsImageGuestCanViewIt(t *testing.T) {
+	env := newIntegrationEnv(t)
+	defer env.Server.Close()
+
+	browser := newIntegrationBrowser(t)
+	registerAndLogin(
+		t,
+		env.Server,
+		browser,
+		"image-user@example.com",
+		"image-user",
+	)
+
+	imageBytes := mustIntegrationPNG(t)
+	var requestBody bytes.Buffer
+	writer := multipart.NewWriter(&requestBody)
+	for name, value := range map[string]string{
+		"title":    "Post with public image",
+		"body":     "This image should remain visible after logout.",
+		"category": "2",
+	} {
+		if err := writer.WriteField(name, value); err != nil {
+			t.Fatalf("WriteField(%q): %v", name, err)
+		}
+	}
+	imagePart, err := writer.CreateFormFile("image", "browser-name.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile(): %v", err)
+	}
+	if _, err := imagePart.Write(imageBytes); err != nil {
+		t.Fatalf("write multipart image: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req, err := http.NewRequest(
+		http.MethodPost,
+		env.Server.URL+"/posts",
+		&requestBody,
+	)
+	if err != nil {
+		t.Fatalf("create post request: %v", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	res, err := browser.Do(req)
+	if err != nil {
+		t.Fatalf("POST /posts: %v", err)
+	}
+	if res.StatusCode != http.StatusSeeOther {
+		t.Fatalf("create post status = %d, want %d", res.StatusCode, http.StatusSeeOther)
+	}
+	postLocation := res.Header.Get("Location")
+	res.Body.Close()
+	if !strings.HasPrefix(postLocation, "/posts/") {
+		t.Fatalf("post Location = %q, want /posts/<id>", postLocation)
+	}
+
+	var imagePath string
+	if err := env.DB.QueryRow(
+		`SELECT image_path FROM posts WHERE title = ?`,
+		"Post with public image",
+	).Scan(&imagePath); err != nil {
+		t.Fatalf("query stored image path: %v", err)
+	}
+	if !strings.HasPrefix(imagePath, "/static/uploads/") {
+		t.Fatalf("stored image path = %q, want /static/uploads/ prefix", imagePath)
+	}
+
+	logoutResponse, err := browser.PostForm(env.Server.URL+"/logout", url.Values{})
+	if err != nil {
+		t.Fatalf("POST /logout: %v", err)
+	}
+	if logoutResponse.StatusCode != http.StatusSeeOther {
+		t.Fatalf("logout status = %d, want %d", logoutResponse.StatusCode, http.StatusSeeOther)
+	}
+	logoutResponse.Body.Close()
+
+	postResponse, err := browser.Get(env.Server.URL + postLocation)
+	if err != nil {
+		t.Fatalf("guest GET post: %v", err)
+	}
+	postBody, err := io.ReadAll(postResponse.Body)
+	postResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read guest post response: %v", err)
+	}
+	if postResponse.StatusCode != http.StatusOK {
+		t.Fatalf("guest post status = %d, want %d", postResponse.StatusCode, http.StatusOK)
+	}
+	if !strings.Contains(string(postBody), `src="`+imagePath+`"`) {
+		t.Fatalf("guest post does not render image path %q", imagePath)
+	}
+
+	imageResponse, err := browser.Get(env.Server.URL + imagePath)
+	if err != nil {
+		t.Fatalf("guest GET image: %v", err)
+	}
+	servedBytes, err := io.ReadAll(imageResponse.Body)
+	imageResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read guest image response: %v", err)
+	}
+	if imageResponse.StatusCode != http.StatusOK {
+		t.Fatalf("guest image status = %d, want %d", imageResponse.StatusCode, http.StatusOK)
+	}
+	if contentType := imageResponse.Header.Get("Content-Type"); contentType != "image/png" {
+		t.Fatalf("guest image Content-Type = %q, want image/png", contentType)
+	}
+	if !bytes.Equal(servedBytes, imageBytes) {
+		t.Fatal("guest received image bytes different from the upload")
+	}
+}
+
+func mustIntegrationPNG(t *testing.T) []byte {
+	t.Helper()
+
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	img.Set(1, 0, color.RGBA{G: 255, A: 255})
+	img.Set(0, 1, color.RGBA{B: 255, A: 255})
+	img.Set(1, 1, color.RGBA{R: 255, G: 255, A: 255})
+
+	var data bytes.Buffer
+	if err := png.Encode(&data, img); err != nil {
+		t.Fatalf("encode PNG: %v", err)
+	}
+
+	return data.Bytes()
 }
 func createPost(
 	t *testing.T,
