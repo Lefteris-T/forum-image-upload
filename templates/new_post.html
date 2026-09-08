@@ -34,7 +34,11 @@
             or something useful you've learned.
         </p>
 
-        <form method="post" action="/posts">
+        <form
+            method="post"
+            action="/posts"
+            enctype="multipart/form-data"
+        >
 
             <div>
                 <label for="title">
@@ -60,6 +64,24 @@
                     rows="10"
                     required
                 ></textarea>
+            </div>
+
+            <div>
+                <label for="image">
+                    Image (optional)
+                </label>
+
+                <input
+                    id="image"
+                    name="image"
+                    type="file"
+                    accept="image/jpeg,image/png,image/gif"
+                >
+
+                <p>
+                    Supported formats: JPEG, PNG, and GIF.
+                    Maximum size: 20 MB.
+                </p>
             </div>
 
             <fieldset>

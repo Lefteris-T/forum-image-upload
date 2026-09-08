@@ -1,6 +1,16 @@
 package handler
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"image"
+	"image/color"
+	"image/gif"
+	"image/jpeg"
+	"image/png"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +20,7 @@ import (
 
 	"forum/internal/model"
 	"forum/internal/repository"
+	"forum/internal/upload"
 	"forum/internal/validation"
 	"forum/internal/web/middleware"
 	"forum/internal/web/view"
@@ -72,6 +83,36 @@ type fakePostCreationService struct {
 
 	postID int64
 	err    error
+}
+
+type fakePostImageStorage struct {
+	saveCalled bool
+	savedBytes []byte
+	publicPath string
+	saveErr    error
+
+	deleteCalled bool
+	deletedPath  string
+	deleteErr    error
+}
+
+func (f *fakePostImageStorage) Save(r io.Reader) (string, error) {
+	f.saveCalled = true
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return "", err
+	}
+	f.savedBytes = data
+
+	return f.publicPath, f.saveErr
+}
+
+func (f *fakePostImageStorage) Delete(publicPath string) error {
+	f.deleteCalled = true
+	f.deletedPath = publicPath
+
+	return f.deleteErr
 }
 
 func (f *fakePostCreationService) Create(
@@ -639,6 +680,7 @@ func TestNewPostHandlerShowsCategoriesToAuthenticatedUser(t *testing.T) {
 		nil,
 		categories,
 		renderer,
+		nil,
 	)
 
 	req := httptest.NewRequest(
@@ -709,6 +751,7 @@ func TestNewPostHandlerRejectsGuest(t *testing.T) {
 		nil,
 		categories,
 		renderer,
+		nil,
 	)
 
 	req := httptest.NewRequest(
@@ -755,6 +798,7 @@ func TestPostCreationHandlerPOSTAcceptsOneOrManyCategories(t *testing.T) {
 
 			h := NewPostCreationHandler(
 				service,
+				nil,
 				nil,
 				nil,
 			)
@@ -824,6 +868,563 @@ func TestPostCreationHandlerPOSTAcceptsOneOrManyCategories(t *testing.T) {
 		})
 	}
 }
+
+func TestPostCreationHandlerPOSTAcceptsMultipartPostWithoutImage(t *testing.T) {
+	service := &fakePostCreationService{postID: 99}
+	h := NewPostCreationHandler(service, nil, nil, nil)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	fields := map[string][]string{
+		"title":    {"Multipart title"},
+		"body":     {"Multipart body"},
+		"category": {"1", "2"},
+	}
+	for name, values := range fields {
+		for _, value := range values {
+			if err := writer.WriteField(name, value); err != nil {
+				t.Fatalf("WriteField(%q): %v", name, err)
+			}
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/posts", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req = req.WithContext(middleware.ContextWithUser(
+		req.Context(),
+		model.User{ID: 42, Username: "lefteris"},
+	))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+	if !service.called {
+		t.Fatal("post service Create() was not called")
+	}
+	if service.input.Title != "Multipart title" {
+		t.Fatalf("title = %q, want %q", service.input.Title, "Multipart title")
+	}
+	if service.input.Body != "Multipart body" {
+		t.Fatalf("body = %q, want %q", service.input.Body, "Multipart body")
+	}
+	if len(service.input.CategoryIDs) != 2 ||
+		service.input.CategoryIDs[0] != 1 ||
+		service.input.CategoryIDs[1] != 2 {
+		t.Fatalf("category IDs = %v, want [1 2]", service.input.CategoryIDs)
+	}
+	if service.input.ImagePath != "" {
+		t.Fatalf("image path = %q, want empty", service.input.ImagePath)
+	}
+}
+
+func TestPostCreationHandlerPOSTSavesSupportedImage(t *testing.T) {
+	tests := []struct {
+		name       string
+		filename   string
+		extension  string
+		imageBytes func(*testing.T) []byte
+	}{
+		{name: "jpeg", filename: "photo.jpeg", extension: ".jpg", imageBytes: mustPostJPEG},
+		{name: "png", filename: "photo.png", extension: ".png", imageBytes: mustPostPNG},
+		{name: "gif", filename: "photo.gif", extension: ".gif", imageBytes: mustPostGIF},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			imageBytes := tt.imageBytes(t)
+			publicPath := "/static/uploads/550e8400-e29b-41d4-a716-446655440000" + tt.extension
+
+			images := &fakePostImageStorage{publicPath: publicPath}
+			service := &fakePostCreationService{postID: 99}
+			h := NewPostCreationHandler(service, nil, nil, images)
+
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			for name, value := range map[string]string{
+				"title":    "Image post",
+				"body":     "Post with an image",
+				"category": "1",
+			} {
+				if err := writer.WriteField(name, value); err != nil {
+					t.Fatalf("WriteField(%q): %v", name, err)
+				}
+			}
+
+			filePart, err := writer.CreateFormFile("image", tt.filename)
+			if err != nil {
+				t.Fatalf("CreateFormFile(): %v", err)
+			}
+			if _, err := filePart.Write(imageBytes); err != nil {
+				t.Fatalf("write multipart image: %v", err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatalf("close multipart writer: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/posts", &body)
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+			req = req.WithContext(middleware.ContextWithUser(
+				req.Context(),
+				model.User{ID: 42, Username: "lefteris"},
+			))
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+			}
+			if !images.saveCalled {
+				t.Fatal("image storage Save() was not called")
+			}
+			if !bytes.Equal(images.savedBytes, imageBytes) {
+				t.Fatal("image storage received different bytes")
+			}
+			if service.input.ImagePath != publicPath {
+				t.Fatalf("ImagePath = %q, want %q", service.input.ImagePath, publicPath)
+			}
+		})
+	}
+}
+
+func TestPostCreationHandlerPOSTMapsImageStorageErrors(t *testing.T) {
+	unexpectedErr := errors.New("disk path /secret/uploads is unavailable")
+	tests := []struct {
+		name       string
+		storageErr error
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name:       "oversized image",
+			storageErr: upload.ErrImageTooLarge,
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "Image is too big. Maximum size is 20 MB.",
+		},
+		{
+			name:       "unsupported image",
+			storageErr: upload.ErrUnsupportedImageType,
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "Only JPEG, PNG, and GIF images are supported.",
+		},
+		{
+			name:       "empty image",
+			storageErr: upload.ErrEmptyImage,
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "The selected image could not be read.",
+		},
+		{
+			name:       "unreadable image",
+			storageErr: upload.ErrUnreadableImage,
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "The selected image could not be read.",
+		},
+		{
+			name:       "unexpected storage failure",
+			storageErr: unexpectedErr,
+			wantStatus: http.StatusInternalServerError,
+			wantBody:   http.StatusText(http.StatusInternalServerError),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			images := &fakePostImageStorage{saveErr: tt.storageErr}
+			service := &fakePostCreationService{postID: 99}
+			h := NewPostCreationHandler(service, nil, nil, images)
+
+			req := newMultipartImagePostRequest(t, mustPostPNG(t))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			if !strings.Contains(rec.Body.String(), tt.wantBody) {
+				t.Fatalf("body = %q, want text %q", rec.Body.String(), tt.wantBody)
+			}
+			if strings.Contains(rec.Body.String(), unexpectedErr.Error()) {
+				t.Fatal("response leaked internal storage error")
+			}
+			if service.called {
+				t.Fatal("post service Create() was called after image failure")
+			}
+		})
+	}
+}
+
+func TestPostCreationHandlerPOSTDeletesImageAfterServiceFailure(t *testing.T) {
+	unexpectedErr := errors.New("database /secret/forum.db is unavailable")
+	tests := []struct {
+		name       string
+		serviceErr error
+		deleteErr  error
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name:       "post validation failure",
+			serviceErr: validation.ErrPostTitleRequired,
+			wantStatus: http.StatusBadRequest,
+			wantBody:   http.StatusText(http.StatusBadRequest),
+		},
+		{
+			name:       "unexpected persistence failure",
+			serviceErr: unexpectedErr,
+			wantStatus: http.StatusInternalServerError,
+			wantBody:   http.StatusText(http.StatusInternalServerError),
+		},
+		{
+			name:       "cleanup failure preserves validation response",
+			serviceErr: validation.ErrPostBodyRequired,
+			deleteErr:  errors.New("cleanup failed"),
+			wantStatus: http.StatusBadRequest,
+			wantBody:   http.StatusText(http.StatusBadRequest),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const publicPath = "/static/uploads/550e8400-e29b-41d4-a716-446655440000.png"
+			images := &fakePostImageStorage{
+				publicPath: publicPath,
+				deleteErr:  tt.deleteErr,
+			}
+			service := &fakePostCreationService{err: tt.serviceErr}
+			h := NewPostCreationHandler(service, nil, nil, images)
+
+			req := newMultipartImagePostRequest(t, mustPostPNG(t))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			if !strings.Contains(rec.Body.String(), tt.wantBody) {
+				t.Fatalf("body = %q, want text %q", rec.Body.String(), tt.wantBody)
+			}
+			if strings.Contains(rec.Body.String(), unexpectedErr.Error()) {
+				t.Fatal("response leaked internal service error")
+			}
+			if !images.deleteCalled {
+				t.Fatal("image storage Delete() was not called")
+			}
+			if images.deletedPath != publicPath {
+				t.Fatalf("deleted path = %q, want %q", images.deletedPath, publicPath)
+			}
+		})
+	}
+}
+
+func TestPostCreationHandlerPOSTDoesNotDeleteForTextOnlyFailure(t *testing.T) {
+	images := &fakePostImageStorage{}
+	service := &fakePostCreationService{err: validation.ErrPostTitleRequired}
+	h := NewPostCreationHandler(service, nil, nil, images)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/posts",
+		strings.NewReader("title=&body=World&category=1"),
+	)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = req.WithContext(middleware.ContextWithUser(
+		req.Context(),
+		model.User{ID: 42, Username: "lefteris"},
+	))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if images.deleteCalled {
+		t.Fatal("image storage Delete() was called for a text-only post")
+	}
+}
+
+func TestPostCreationHandlerPOSTRejectsMalformedMultipart(t *testing.T) {
+	images := &fakePostImageStorage{}
+	service := &fakePostCreationService{postID: 99}
+	h := NewPostCreationHandler(service, nil, nil, images)
+
+	req := httptest.NewRequest(http.MethodPost, "/posts", strings.NewReader("broken multipart body"))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=missing")
+	req = req.WithContext(middleware.ContextWithUser(
+		req.Context(),
+		model.User{ID: 42, Username: "lefteris"},
+	))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if images.saveCalled {
+		t.Fatal("image storage Save() was called for malformed multipart data")
+	}
+	if service.called {
+		t.Fatal("post service Create() was called for malformed multipart data")
+	}
+}
+
+func TestPostCreationHandlerPOSTRejectsExcessiveMultipartRequest(t *testing.T) {
+	images := &fakePostImageStorage{}
+	service := &fakePostCreationService{postID: 99}
+	h := NewPostCreationHandler(service, nil, nil, images)
+
+	req := newMultipartImagePostRequest(
+		t,
+		bytes.Repeat([]byte{0}, int(maxPostRequestSize)+1),
+	)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if images.saveCalled {
+		t.Fatal("image storage Save() was called for excessive request")
+	}
+	if service.called {
+		t.Fatal("post service Create() was called for excessive request")
+	}
+}
+
+func TestPostCreationHandlerPOSTEnforcesExactImageSizeBoundary(t *testing.T) {
+	baseImage := mustPostPNG(t)
+	if len(baseImage) > upload.MaxImageSize {
+		t.Fatalf("base image size = %d, exceeds upload limit", len(baseImage))
+	}
+
+	tests := []struct {
+		name          string
+		size          int
+		contentLength int64
+		wantStatus    int
+		wantService   bool
+	}{
+		{
+			name:          "exactly 20 MiB",
+			size:          upload.MaxImageSize,
+			contentLength: 0,
+			wantStatus:    http.StatusSeeOther,
+			wantService:   true,
+		},
+		{
+			name:          "20 MiB plus one with unknown length",
+			size:          upload.MaxImageSize + 1,
+			contentLength: -1,
+			wantStatus:    http.StatusBadRequest,
+			wantService:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			imageBytes := append([]byte{}, baseImage...)
+			imageBytes = append(
+				imageBytes,
+				bytes.Repeat([]byte{0}, tt.size-len(imageBytes))...,
+			)
+
+			images, err := upload.NewStorage(filepath.Join(t.TempDir(), "uploads"))
+			if err != nil {
+				t.Fatalf("upload.NewStorage(): %v", err)
+			}
+			service := &fakePostCreationService{postID: 99}
+			h := NewPostCreationHandler(service, nil, nil, images)
+
+			req := newMultipartImagePostRequest(t, imageBytes)
+			if tt.contentLength == -1 {
+				req.ContentLength = -1
+			}
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			if service.called != tt.wantService {
+				t.Fatalf("service called = %t, want %t", service.called, tt.wantService)
+			}
+			if tt.wantService && service.input.ImagePath == "" {
+				t.Fatal("accepted image post has an empty ImagePath")
+			}
+		})
+	}
+}
+
+func TestPostCreationHandlerPOSTRejectsGuestUploadBeforeStorage(t *testing.T) {
+	images := &fakePostImageStorage{}
+	service := &fakePostCreationService{postID: 99}
+	h := NewPostCreationHandler(service, nil, nil, images)
+
+	req := newMultipartImagePostRequest(t, mustPostPNG(t))
+	req = req.WithContext(context.Background())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	if images.saveCalled {
+		t.Fatal("image storage Save() was called for guest upload")
+	}
+	if service.called {
+		t.Fatal("post service Create() was called for guest upload")
+	}
+}
+
+func TestPostCreationHandlerPOSTRejectsInvalidCategoryBeforeStorage(t *testing.T) {
+	images := &fakePostImageStorage{}
+	service := &fakePostCreationService{postID: 99}
+	h := NewPostCreationHandler(service, nil, nil, images)
+
+	req := newMultipartImagePostRequestWithCategory(t, mustPostPNG(t), "invalid")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if images.saveCalled {
+		t.Fatal("image storage Save() was called for invalid category")
+	}
+	if service.called {
+		t.Fatal("post service Create() was called for invalid category")
+	}
+}
+
+func TestPostCreationHandlerPOSTRemovesMultipartTemporaryFiles(t *testing.T) {
+	temporaryDir := filepath.Join(t.TempDir(), "multipart-temp")
+	if err := os.Mkdir(temporaryDir, 0o755); err != nil {
+		t.Fatalf("create multipart temporary directory: %v", err)
+	}
+	t.Setenv("TMPDIR", temporaryDir)
+
+	imageBytes := mustPostPNG(t)
+	imageBytes = append(
+		imageBytes,
+		bytes.Repeat([]byte{0}, multipartMemoryLimit+1-len(imageBytes))...,
+	)
+
+	images := &fakePostImageStorage{
+		publicPath: "/static/uploads/550e8400-e29b-41d4-a716-446655440000.png",
+	}
+	service := &fakePostCreationService{postID: 99}
+	h := NewPostCreationHandler(service, nil, nil, images)
+
+	req := newMultipartImagePostRequest(t, imageBytes)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+	entries, err := os.ReadDir(temporaryDir)
+	if err != nil {
+		t.Fatalf("read multipart temporary directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("multipart temporary directory contains %d files after request", len(entries))
+	}
+}
+
+func newMultipartImagePostRequest(t *testing.T, imageBytes []byte) *http.Request {
+	return newMultipartImagePostRequestWithCategory(t, imageBytes, "1")
+}
+
+func newMultipartImagePostRequestWithCategory(
+	t *testing.T,
+	imageBytes []byte,
+	category string,
+) *http.Request {
+	t.Helper()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for name, value := range map[string]string{
+		"title":    "Image post",
+		"body":     "Post with an image",
+		"category": category,
+	} {
+		if err := writer.WriteField(name, value); err != nil {
+			t.Fatalf("WriteField(%q): %v", name, err)
+		}
+	}
+
+	filePart, err := writer.CreateFormFile("image", "image.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile(): %v", err)
+	}
+	if _, err := filePart.Write(imageBytes); err != nil {
+		t.Fatalf("write multipart image: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/posts", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	return req.WithContext(middleware.ContextWithUser(
+		req.Context(),
+		model.User{ID: 42, Username: "lefteris"},
+	))
+}
+
+func mustPostPNG(t *testing.T) []byte {
+	t.Helper()
+
+	var data bytes.Buffer
+	if err := png.Encode(&data, postTestImage()); err != nil {
+		t.Fatalf("encode PNG: %v", err)
+	}
+
+	return data.Bytes()
+}
+
+func mustPostJPEG(t *testing.T) []byte {
+	t.Helper()
+
+	var data bytes.Buffer
+	if err := jpeg.Encode(&data, postTestImage(), nil); err != nil {
+		t.Fatalf("encode JPEG: %v", err)
+	}
+
+	return data.Bytes()
+}
+
+func mustPostGIF(t *testing.T) []byte {
+	t.Helper()
+
+	var data bytes.Buffer
+	if err := gif.Encode(&data, postTestImage(), nil); err != nil {
+		t.Fatalf("encode GIF: %v", err)
+	}
+
+	return data.Bytes()
+}
+
+func postTestImage() image.Image {
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	img.Set(1, 0, color.RGBA{G: 255, A: 255})
+	img.Set(0, 1, color.RGBA{B: 255, A: 255})
+	img.Set(1, 1, color.RGBA{R: 255, G: 255, A: 255})
+
+	return img
+}
+
 func TestPostCreationHandlerPOSTInvalidInputReturnsBadRequest(t *testing.T) {
 	tests := []struct {
 		name string
@@ -855,6 +1456,7 @@ func TestPostCreationHandlerPOSTInvalidInputReturnsBadRequest(t *testing.T) {
 
 			h := NewPostCreationHandler(
 				service,
+				nil,
 				nil,
 				nil,
 			)

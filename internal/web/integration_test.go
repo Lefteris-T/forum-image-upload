@@ -19,6 +19,7 @@ import (
 	"forum/internal/repository"
 	"forum/internal/service"
 	sessionpkg "forum/internal/session"
+	"forum/internal/upload"
 	"forum/internal/web/handler"
 	"forum/internal/web/middleware"
 	"forum/internal/web/view"
@@ -182,6 +183,14 @@ func newIntegrationEnvWithOAuth(
 		)
 	}
 
+	staticDir := t.TempDir()
+	imageStorage, err := upload.NewStorage(
+		filepath.Join(staticDir, "uploads"),
+	)
+	if err != nil {
+		t.Fatalf("upload.NewStorage(): %v", err)
+	}
+
 	// -------------------------------------------------
 	// Handlers
 	// -------------------------------------------------
@@ -220,6 +229,7 @@ func newIntegrationEnvWithOAuth(
 		postService,
 		categories,
 		renderer,
+		imageStorage,
 	)
 
 	commentHandler := handler.NewCommentSubmissionHandler(
@@ -304,13 +314,7 @@ func newIntegrationEnvWithOAuth(
 			GoogleOAuthCallback: googleOAuthCallbackHandler,
 
 			Static: http.FileServer(
-				http.Dir(
-					filepath.Join(
-						"..",
-						"..",
-						"static",
-					),
-				),
+				http.Dir(staticDir),
 			),
 		},
 	)

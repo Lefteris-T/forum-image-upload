@@ -17,6 +17,7 @@ import (
 	"forum/internal/repository"
 	"forum/internal/service"
 	sessionpkg "forum/internal/session"
+	"forum/internal/upload"
 	"forum/internal/web"
 	"forum/internal/web/handler"
 	"forum/internal/web/middleware"
@@ -160,6 +161,18 @@ func buildHandler(
 		)
 	}
 
+	imageStorage, err := upload.NewStorage(
+		resolveProjectPath("static/uploads"),
+	)
+	if err != nil {
+		cleanup()
+
+		return nil, nil, fmt.Errorf(
+			"create image storage: %w",
+			err,
+		)
+	}
+
 	registerHandler := handler.NewRegisterHandler(
 		authService,
 		renderer,
@@ -194,6 +207,7 @@ func buildHandler(
 		postService,
 		categories,
 		renderer,
+		imageStorage,
 	)
 
 	commentHandler := handler.NewCommentSubmissionHandler(
