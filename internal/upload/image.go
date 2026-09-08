@@ -44,27 +44,12 @@ func ValidateImage(r io.Reader) (ValidatedImage, error) {
 		return ValidatedImage{}, ErrUnreadableImage
 	}
 
-	if len(data) > MaxImageSize {
-		return ValidatedImage{}, ErrImageTooLarge
-	}
-
-	if len(data) == 0 {
-		return ValidatedImage{}, ErrEmptyImage
-	}
-
-	contentType := http.DetectContentType(data)
-	extension, ok := extensionForContentType(contentType)
-	if !ok {
-		return ValidatedImage{}, ErrUnsupportedImageType
-	}
-
-	format, err := decodedImageFormat(data)
+	contentType, extension, err := validateImageContent(
+		bytes.NewReader(data),
+		int64(len(data)),
+	)
 	if err != nil {
-		return ValidatedImage{}, ErrUnreadableImage
-	}
-
-	if !contentTypeMatchesFormat(contentType, format) {
-		return ValidatedImage{}, ErrUnsupportedImageType
+		return ValidatedImage{}, err
 	}
 
 	return ValidatedImage{
@@ -72,6 +57,44 @@ func ValidateImage(r io.Reader) (ValidatedImage, error) {
 		Extension:   extension,
 		Bytes:       data,
 	}, nil
+}
+
+func validateImageContent(r io.ReadSeeker, size int64) (string, string, error) {
+	if size > MaxImageSize {
+		return "", "", ErrImageTooLarge
+	}
+	if size == 0 {
+		return "", "", ErrEmptyImage
+	}
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return "", "", ErrUnreadableImage
+	}
+
+	headerSize := min(size, 512)
+	header := make([]byte, headerSize)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return "", "", ErrUnreadableImage
+	}
+
+	contentType := http.DetectContentType(header)
+	extension, ok := extensionForContentType(contentType)
+	if !ok {
+		return "", "", ErrUnsupportedImageType
+	}
+
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return "", "", ErrUnreadableImage
+	}
+
+	_, format, err := image.DecodeConfig(r)
+	if err != nil {
+		return "", "", ErrUnreadableImage
+	}
+	if !contentTypeMatchesFormat(contentType, format) {
+		return "", "", ErrUnsupportedImageType
+	}
+
+	return contentType, extension, nil
 }
 
 func extensionForContentType(contentType string) (string, bool) {
@@ -87,15 +110,6 @@ func extensionForContentType(contentType string) (string, bool) {
 	}
 }
 
-func decodedImageFormat(data []byte) (string, error) {
-	_, format, err := image.DecodeConfig(bytes.NewReader(data))
-	if err != nil {
-		return "", err
-	}
-
-	return format, nil
-}
-
 func contentTypeMatchesFormat(contentType string, format string) bool {
 	switch contentType {
 	case "image/jpeg":
@@ -108,4 +122,3 @@ func contentTypeMatchesFormat(contentType string, format string) bool {
 		return false
 	}
 }
- 
