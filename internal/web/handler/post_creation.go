@@ -17,8 +17,7 @@ import (
 
 const (
 	multipartMemoryLimit = 8 * 1024 * 1024
-	multipartOverhead    = 64 * 1024
-	maxPostRequestSize   = int64(upload.MaxImageSize + multipartOverhead)
+	maxPostRequestSize   = 32 * 1024 * 1024
 )
 
 const (

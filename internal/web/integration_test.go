@@ -758,7 +758,7 @@ func TestIntegrationRejectedUploadCreatesNoPostOrImage(t *testing.T) {
 	oversizedPNG := append([]byte{}, validPNG...)
 	oversizedPNG = append(
 		oversizedPNG,
-		bytes.Repeat([]byte{0}, upload.MaxImageSize+1-len(oversizedPNG))...,
+		bytes.Repeat([]byte{0}, 25*1024*1024-len(oversizedPNG))...,
 	)
 
 	tests := []struct {
@@ -811,6 +811,9 @@ func TestIntegrationRejectedUploadCreatesNoPostOrImage(t *testing.T) {
 
 			if res.StatusCode != http.StatusBadRequest {
 				t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusBadRequest)
+			}
+			if res.Close {
+				t.Fatal("server requested connection close for rejected upload")
 			}
 			if !strings.Contains(string(responseBody), tt.wantBody) {
 				t.Fatalf("response body = %q, want text %q", responseBody, tt.wantBody)
@@ -1651,6 +1654,90 @@ func TestIntegrationInvalidRegistrationReturns400(t *testing.T) {
 		)
 	}
 }
+
+func TestIntegrationAuthFormsDelegateValidationToServer(t *testing.T) {
+	server := newIntegrationServer(t)
+	defer server.Close()
+
+	for _, path := range []string{"/login", "/register"} {
+		res, err := http.Get(server.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+
+		body, err := io.ReadAll(res.Body)
+		res.Body.Close()
+		if err != nil {
+			t.Fatalf("read GET %s response: %v", path, err)
+		}
+
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf(
+				"GET %s status = %d, want %d",
+				path,
+				res.StatusCode,
+				http.StatusOK,
+			)
+		}
+
+		if !strings.Contains(string(body), "novalidate") {
+			t.Fatalf("GET %s form does not delegate validation to server", path)
+		}
+	}
+
+	tests := []struct {
+		name        string
+		form        url.Values
+		wantMessage string
+	}{
+		{
+			name: "missing email",
+			form: url.Values{
+				"password": {"strong-password-123"},
+			},
+			wantMessage: "email is required",
+		},
+		{
+			name: "missing password",
+			form: url.Values{
+				"email": {"alice@example.com"},
+			},
+			wantMessage: "password is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := http.PostForm(server.URL+"/login", tt.form)
+			if err != nil {
+				t.Fatalf("POST /login: %v", err)
+			}
+
+			body, err := io.ReadAll(res.Body)
+			res.Body.Close()
+			if err != nil {
+				t.Fatalf("read POST /login response: %v", err)
+			}
+
+			if res.StatusCode != http.StatusBadRequest {
+				t.Fatalf(
+					"status = %d, want %d",
+					res.StatusCode,
+					http.StatusBadRequest,
+				)
+			}
+
+			if !strings.Contains(string(body), tt.wantMessage) {
+				t.Fatalf(
+					"body does not contain %q: %s",
+					tt.wantMessage,
+					body,
+				)
+			}
+		})
+	}
+}
+
 func TestIntegrationDuplicateRegistrationReturns409(t *testing.T) {
 	server := newIntegrationServer(t)
 	defer server.Close()
