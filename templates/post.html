@@ -5,38 +5,38 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
-    <title>{{.Post.Title}} - Forum</title>
+    <title>{{.Post.Title}} — Common Ground</title>
 
     <link rel="stylesheet" href="/static/style.css">
 </head>
 
 <body>
 
-<header>
-    <nav aria-label="Main navigation">
+<header class="site-header">
+    <nav class="site-nav" aria-label="Main navigation">
 
-        <a href="/">Forum</a>
+        <a class="brand" href="/" aria-label="Common Ground home"><span class="brand-mark" aria-hidden="true">✦</span><span>Common Ground</span></a>
 
         {{if .CurrentUser}}
 
-            <a href="/posts/new">
-                Create Post
+            <a class="nav-link primary" href="/posts/new">
+                New post
             </a>
 
             <form method="post" action="/logout">
-                <button type="submit">
-                    Logout
+                <button class="nav-button" type="submit">
+                    Log out
                 </button>
             </form>
 
         {{else}}
 
-            <a href="/login">
-                Login
+            <a class="nav-link" href="/login">
+                Log in
             </a>
 
-            <a href="/register">
-                Register
+            <a class="nav-link primary" href="/register">
+                Join the forum
             </a>
 
         {{end}}
@@ -44,7 +44,7 @@
     </nav>
 </header>
 
-<main>
+<main class="page-shell">
 
     <article class="post-detail">
 
@@ -100,11 +100,11 @@
 
         <footer>
 
-            <span>
+            <span class="stat">
                 👍 {{.Post.Likes}}
             </span>
 
-            <span>
+            <span class="stat">
                 👎 {{.Post.Dislikes}}
             </span>
 
@@ -170,11 +170,11 @@
 
                     <footer>
 
-                        <span>
+                        <span class="stat">
                             👍 {{.Likes}}
                         </span>
 
-                        <span>
+                        <span class="stat">
                             👎 {{.Dislikes}}
                         </span>
 

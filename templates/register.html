@@ -5,21 +5,21 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
-    <title>Register - Forum</title>
+    <title>Join — Common Ground</title>
 
     <link rel="stylesheet" href="/static/style.css">
 </head>
 
 <body>
 
-<header>
-    <nav aria-label="Main navigation">
-        <a href="/">Forum</a>
-        <a href="/login">Login</a>
+<header class="site-header">
+    <nav class="site-nav" aria-label="Main navigation">
+        <a class="brand" href="/" aria-label="Common Ground home"><span class="brand-mark" aria-hidden="true">✦</span><span>Common Ground</span></a>
+        <a class="nav-link" href="/login">Log in</a>
     </nav>
 </header>
 
-<main>
+<main class="page-shell">
 
     <section
         class="form-card compact"
@@ -27,12 +27,11 @@
     >
 
         <h1 id="register-title">
-            Create account
+            Join the conversation.
         </h1>
 
         <p>
-            Join the community and start sharing
-            what you're learning.
+            Make a space for your questions, ideas, and discoveries.
         </p>
 
         {{if .Error}}
@@ -43,7 +42,7 @@
 
         <form method="post" action="/register" novalidate>
 
-            <div>
+            <div class="field">
                 <label for="email">
                     Email
                 </label>
@@ -58,7 +57,7 @@
                 >
             </div>
 
-            <div>
+            <div class="field">
                 <label for="username">
                     Username
                 </label>
@@ -73,7 +72,7 @@
                 >
             </div>
 
-            <div>
+            <div class="field">
                 <label for="password">
                     Password
                 </label>
@@ -111,10 +110,10 @@
             </div>
         {{end}}
 
-        <p>
+        <p class="auth-switch">
             Already have an account?
             <a href="/login">
-                <strong>Login</strong>
+                <strong>Log in</strong>
             </a>
         </p>
 

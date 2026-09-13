@@ -1,132 +1,49 @@
 <!doctype html>
 <html lang="en">
-
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-
-    <title>Forum</title>
-
+    <meta name="description" content="A community for practical ideas, thoughtful questions, and things worth sharing.">
+    <title>Common Ground — Community Forum</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
-
 <body>
-
-<header>
-    <nav aria-label="Main navigation">
-        <a href="/">Forum</a>
-
+<header class="site-header">
+    <nav class="site-nav" aria-label="Main navigation">
+        <a class="brand" href="/" aria-label="Common Ground home"><span class="brand-mark" aria-hidden="true">✦</span><span>Common Ground</span></a>
         {{if .CurrentUser}}
-            <a href="/posts/new">Create Post</a>
-            <a href="/?filter=created">My Posts</a>
-            <a href="/?filter=liked">Liked Posts</a>
-
-            <form method="post" action="/logout">
-                <button type="submit">Logout</button>
-            </form>
+            <a class="nav-link" href="/?filter=created">My posts</a>
+            <a class="nav-link" href="/?filter=liked">Saved</a>
+            <a class="nav-link primary" href="/posts/new">New Post</a>
+            <form method="post" action="/logout"><button class="nav-button" type="submit">Logout</button></form>
         {{else}}
-            <a href="/login">Login</a>
-            <a href="/register">Register</a>
+            <a class="nav-link" href="/login">Login</a>
+            <a class="nav-link primary" href="/register">Register</a>
         {{end}}
     </nav>
 </header>
-
-<main>
-
+<main class="page-shell">
     <header class="page-hero">
-        <h1>Forum</h1>
-
-        <p class="subtitle">
-            Learn, build, and discuss.
-            Share ideas, solve problems, and grow together
-            through programming and technology.
-        </p>
-
-        {{if .CurrentUser}}
-            <p class="user-greeting">
-                Signed in as
-                <strong>{{.CurrentUser.Username}}</strong>
-            </p>
-        {{end}}
+        <p class="eyebrow">The community noticeboard</p>
+        <h1>Ideas grow better together.</h1>
+        <p class="subtitle">Ask useful questions, share what you’ve learned, and meet people building their way through the same things.</p>
+        {{if .CurrentUser}}<p class="user-greeting">Welcome back, <strong>{{.CurrentUser.Username}}</strong></p>{{end}}
     </header>
-
     {{if .Posts}}
-
-        <section
-            class="posts-section"
-            aria-labelledby="posts-title"
-        >
-            <h2 id="posts-title">
-                Latest discussions
-            </h2>
-
+        <div class="section-heading"><h2>Latest conversations</h2><p>A fresh look at what the community is discussing</p></div>
+        <section class="posts-section" aria-label="Latest conversations">
             {{range .Posts}}
-
                 <article class="post-card">
-
-                    <header>
-                        <h3>
-                            <a href="/posts/{{.ID}}">
-                                {{.Title}}
-                            </a>
-                        </h3>
-
-                        <p class="post-meta">
-                            By
-                            <strong>{{.Author.Username}}</strong>
-                        </p>
-                    </header>
-
-                    <p class="post-body">
-                        {{.Body}}
-                    </p>
-
-                    {{if .Categories}}
-
-                        <ul
-                            class="category-list"
-                            aria-label="Post categories"
-                        >
-                            {{range .Categories}}
-                                <li>
-                                    <a href="/?category={{.ID}}">
-                                        {{.Name}}
-                                    </a>
-                                </li>
-                            {{end}}
-                        </ul>
-
-                    {{end}}
-
-                    <footer>
-                        <span>
-                            👍 {{.Likes}}
-                        </span>
-
-                        <span>
-                            👎 {{.Dislikes}}
-                        </span>
-                    </footer>
-
+                    <header><h3><a href="/posts/{{.ID}}">{{.Title}}</a></h3><p class="post-meta">Started by <strong>{{.Author.Username}}</strong></p></header>
+                    <p class="post-body">{{.Body}}</p>
+                    {{if .Categories}}<ul class="category-list" aria-label="Post categories">{{range .Categories}}<li><a href="/?category={{.ID}}">{{.Name}}</a></li>{{end}}</ul>{{end}}
+                    <footer><span class="stat">▲ {{.Likes}}</span><span class="stat">▼ {{.Dislikes}}</span></footer>
                 </article>
-
             {{end}}
         </section>
-
     {{else}}
-
-        <div class="empty-state">
-            <h2>No posts yet</h2>
-
-            <p>
-                The forum is quiet for now.
-                Start the first discussion.
-            </p>
-        </div>
-
+        <div class="empty-state"><h2>It’s quiet here—for now.</h2><p>Be the person who starts the first good conversation.</p>{{if .CurrentUser}}<a class="button" href="/posts/new">Create a post</a>{{end}}</div>
     {{end}}
-
 </main>
-
 </body>
 </html>

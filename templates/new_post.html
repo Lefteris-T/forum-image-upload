@@ -1,122 +1,35 @@
 <!doctype html>
 <html lang="en">
-
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-
-    <title>New Post - Forum</title>
-
+    <title>Start a conversation — Common Ground</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
-
 <body>
-
-<header>
-    <nav aria-label="Main navigation">
-        <a href="/">Forum</a>
-    </nav>
-</header>
-
-<main>
-
-    <section
-        class="form-card"
-        aria-labelledby="new-post-title"
-    >
-
-        <h1 id="new-post-title">
-            Create a new post
-        </h1>
-
-        <p>
-            Share a question, discovery, idea,
-            or something useful you've learned.
-        </p>
-
-        <form
-            method="post"
-            action="/posts"
-            enctype="multipart/form-data"
-        >
-
-            <div>
-                <label for="title">
-                    Title
-                </label>
-
-                <input
-                    id="title"
-                    name="title"
-                    type="text"
-                    required
-                >
-            </div>
-
-            <div>
-                <label for="body">
-                    Body
-                </label>
-
-                <textarea
-                    id="body"
-                    name="body"
-                    rows="10"
-                    required
-                ></textarea>
-            </div>
-
-            <div>
-                <label for="image">
-                    Image (optional)
-                </label>
-
-                <input
-                    id="image"
-                    name="image"
-                    type="file"
-                    accept="image/jpeg,image/png,image/gif"
-                >
-
-                <p>
-                    Supported formats: JPEG, PNG, and GIF.
-                    Maximum size: 20 MB.
-                </p>
-            </div>
-
-            <fieldset>
-                <legend>
-                    Categories
-                </legend>
-
-                {{range .Categories}}
-
-                    <div>
-                        <input
-                            id="category-{{.ID}}"
-                            name="category"
-                            type="checkbox"
-                            value="{{.ID}}"
-                        >
-
-                        <label for="category-{{.ID}}">
-                            {{.Name}}
-                        </label>
+<header class="site-header"><nav class="site-nav" aria-label="Main navigation"><a class="brand" href="/" aria-label="Common Ground home"><span class="brand-mark" aria-hidden="true">✦</span><span>Common Ground</span></a><a class="nav-link" href="/">Cancel</a></nav></header>
+<main class="page-shell">
+    <div class="form-layout">
+        <section class="form-card" aria-labelledby="new-post-title">
+            <header class="form-intro"><p class="eyebrow">New conversation</p><h1 id="new-post-title">Share something worth discussing.</h1><p>A clear title and a little context go a long way.</p></header>
+            <form method="post" action="/posts" enctype="multipart/form-data">
+                <div class="field"><div class="field-row"><label for="title">Title</label><span class="field-hint">Keep it specific</span></div><input id="title" name="title" type="text" placeholder="What would you like to talk about?" required autofocus></div>
+                <div class="field"><div class="field-row"><label for="body">Your post</label><span class="field-hint">Add the useful details</span></div><textarea id="body" name="body" rows="9" placeholder="Give people enough context to join in…" required></textarea></div>
+                <div class="field">
+                    <div class="field-row"><label for="image">Add an image <span class="field-hint">(optional)</span></label><span class="field-hint">JPEG, PNG, GIF · 20 MB max</span></div>
+                    <div class="upload-zone">
+                        <span class="upload-icon" aria-hidden="true">↥</span>
+                        <span class="upload-title">Choose an image to add</span>
+                        <span class="upload-copy">A useful visual can make your post easier to understand.</span>
+                        <input id="image" name="image" type="file" accept="image/jpeg,image/png,image/gif">
                     </div>
-
-                {{end}}
-
-            </fieldset>
-
-            <button type="submit">
-                Publish post
-            </button>
-
-        </form>
-
-    </section>
-
+                </div>
+                <fieldset><legend>Choose a category <span aria-hidden="true">*</span></legend>{{range .Categories}}<span class="category-option"><input id="category-{{.ID}}" name="category" type="radio" value="{{.ID}}" required><label for="category-{{.ID}}">{{.Name}}</label></span>{{end}}</fieldset>
+                <button class="submit-button" type="submit">Publish conversation <span aria-hidden="true">→</span></button>
+            </form>
+        </section>
+        <aside class="tip-card" aria-labelledby="posting-tips"><h2 id="posting-tips">A post people answer</h2><ul><li>Lead with the question or idea.</li><li>Share what you already tried.</li><li>Use an image when it adds context.</li><li>Choose the most relevant categories.</li></ul></aside>
+    </div>
 </main>
-
 </body>
 </html>
