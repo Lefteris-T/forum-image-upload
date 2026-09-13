@@ -355,6 +355,7 @@ source .env
 set +a
 go run ./cmd/forum
 ```
+``` or make run
 
 `.env` is intentionally ignored by Git. Do not commit it.
 
