@@ -35,6 +35,7 @@ func (p *GitHubProvider) AuthorizationURL(
 	q.Set("client_id", p.cfg.ClientID)
 	q.Set("redirect_uri", p.cfg.RedirectURL)
 	q.Set("scope", "user:email")
+	q.Set("prompt", "select_account")
 	q.Set("state", state)
 	q.Set("code_challenge", challenge)
 	q.Set("code_challenge_method", "S256")
