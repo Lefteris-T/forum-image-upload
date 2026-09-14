@@ -41,6 +41,11 @@ func ValidateRegistration(input RegistrationInput) (RegistrationInput, error) {
 		return RegistrationInput{}, fmt.Errorf("invalid email")
 	}
 
+	at := strings.LastIndexByte(email, '@')
+	if at < 1 || !strings.Contains(email[at+1:], ".") {
+		return RegistrationInput{}, fmt.Errorf("email domain must contain a dot")
+	}
+
 	if username == "" {
 		return RegistrationInput{}, fmt.Errorf("username is required")
 	}
@@ -98,6 +103,11 @@ func ValidateLogin(input LoginInput) (LoginInput, error) {
 
 	if _, err := mail.ParseAddress(email); err != nil {
 		return LoginInput{}, fmt.Errorf("invalid email")
+	}
+
+	at := strings.LastIndexByte(email, '@')
+	if at < 1 || !strings.Contains(email[at+1:], ".") {
+		return LoginInput{}, fmt.Errorf("email domain must contain a dot")
 	}
 
 	if input.Password == "" {
