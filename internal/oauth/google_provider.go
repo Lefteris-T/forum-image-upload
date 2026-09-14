@@ -31,6 +31,7 @@ func (p *GoogleProvider) AuthorizationURL(
 	query.Set("redirect_uri", p.cfg.RedirectURL)
 	query.Set("response_type", "code")
 	query.Set("scope", "openid email profile")
+	query.Set("prompt", "select_account")
 	query.Set("state", state)
 	query.Set("code_challenge", challenge)
 	query.Set("code_challenge_method", "S256")
